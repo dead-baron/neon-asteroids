@@ -119,11 +119,13 @@
     box-shadow: 0 0 10px rgba(0,240,255,.5); text-shadow: 0 0 8px var(--cyan);
     -webkit-user-select: text; user-select: text;
   }
-  #roleRow { max-width: 340px; }
+  #roleRow { max-width: 360px; }
+  #roleRow .btn { font-size: 12px; letter-spacing: 1px; }
   #modeRow, #practiceRow { max-width: 300px; }
   #practiceRow .btn { font-size: 12px; padding: 9px 4px; }
   #practiceRow.hidden { display: none; }
-  #quickBtn[hidden] { display: none; }
+  #startBtn.hidden { display: none; }
+  #randomRole[hidden] { display: none; }
   #roleRow .btn { padding: 10px 4px; }
 
   /* In-game menu button: top center, above the round clock */
@@ -169,26 +171,26 @@
   <div class="dots" id="dots"></div>
   <div class="dot-name" id="dotName">NEON PINK</div>
 
-  <!-- One tap into an online match with whoever else is searching -->
-  <button class="btn go" id="quickBtn" style="--accent:#00f0ff">QUICK PLAY</button>
+  <!-- LAUNCH: one tap into an online Quick Play match with whoever else is searching -->
+  <button class="btn go" id="quickBtn" style="--accent:#00f0ff">LAUNCH</button>
 
   <div class="label">OR CHOOSE</div>
   <div class="modes" id="modeRow">
-    <button class="btn sel" data-mode="practice">PRACTICE</button>
-    <button class="btn"     data-mode="online">ONLINE</button>
+    <button class="btn" data-mode="online">ONLINE</button>
+    <button class="btn" data-mode="practice">PRACTICE</button>
   </div>
 
-  <!-- Practice: with or without the bot rival -->
-  <div class="modes" id="practiceRow">
-    <button class="btn sel" data-practice="bot">WITH BOT</button>
-    <button class="btn"     data-practice="solo">SOLO</button>
+  <!-- Practice: with or without the bot rival (starts right away) -->
+  <div class="modes hidden" id="practiceRow">
+    <button class="btn" data-practice="bot">WITH BOT</button>
+    <button class="btn" data-practice="solo">SOLO</button>
   </div>
 
   <div class="room hidden" id="roomBox">
     <div class="modes" id="roleRow">
       <button class="btn sel" data-role="host">HOST</button>
       <button class="btn"     data-role="join">JOIN</button>
-      <button class="btn"     data-role="random" id="randomRole">RANDOM</button>
+      <button class="btn"     data-role="random" id="randomRole">QUICK PLAY</button>
     </div>
     <!-- Host: you get a code to share -->
     <div class="room" id="hostPanel">
@@ -204,16 +206,11 @@
       <div class="label">ENTER YOUR FRIEND'S CODE</div>
       <input id="roomCode" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code" placeholder="····">
     </div>
-    <!-- Random: matchmaking pool -->
-    <div class="room hidden" id="randomPanel">
-      <div class="label">QUICK MATCH</div>
-      <div class="note">You'll be paired with the next pilot who's also searching. One of you hosts automatically.</div>
-    </div>
     <div class="note" id="roomNote"></div>
     <div class="note" id="liveNote">LIVE LINK: CHECKING…</div>
   </div>
 
-  <button class="btn go" id="startBtn">LAUNCH</button>
+  <button class="btn go hidden" id="startBtn">HOST GAME</button>
   <button class="btn small" id="soundBtn">SOUND: ON</button>
   <div class="note" id="buildTag"></div>
 </div>
@@ -262,7 +259,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-172034';
+const BUILD = '20260928-172809';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2346,7 +2343,7 @@ const pauseMenu = document.getElementById('pauseMenu');
 const waitShare = document.getElementById('waitShare');
 
 const sanitizeCode = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
-let onlineRole = 'host';                         // 'host' | 'join'
+let onlineRole = null;                           // 'host' | 'join' | 'random'
 let menuOpen = false;
 
 /** The room code for the chosen role: the one you host, or the one you typed. */
@@ -2358,28 +2355,34 @@ const HOST_NOTE = inClaude()
   : 'Tap SHARE INVITE LINK and send it, or tell your rival the code. They tap ONLINE → JOIN.';
 const JOIN_NOTE = 'Type the 4-letter code your friend is hosting.';
 
-/** Main button label and notes follow the chosen mode and role. */
+/** Which menu section is open: null (just LAUNCH + choices), 'online' or 'practice'. */
+let menuSection = null;
+/** Menu sections, buttons and notes follow the chosen section and role. */
 function refreshMenu() {
-  roomBox.classList.toggle('hidden', mode !== 'online');
-  document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('sel', (x.dataset.mode === 'online') === (mode === 'online')));
-  document.getElementById('practiceRow').classList.toggle('hidden', mode === 'online');
-  document.querySelectorAll('[data-practice]').forEach(x => x.classList.toggle('sel', x.dataset.practice === practiceKind));
-  document.getElementById('hostPanel').classList.toggle('hidden', onlineRole !== 'host');
-  document.getElementById('joinPanel').classList.toggle('hidden', onlineRole !== 'join');
-  document.getElementById('randomPanel').classList.toggle('hidden', onlineRole !== 'random');
-  document.querySelectorAll('[data-role]').forEach(b => b.classList.toggle('sel', b.dataset.role === onlineRole));
-  startBtn.textContent = mode !== 'online' ? 'LAUNCH' : onlineRole === 'host' ? 'HOST GAME' : onlineRole === 'join' ? 'JOIN GAME' : 'FIND MATCH';
-  if (!roomNote.dataset.custom) { roomNote.textContent = onlineRole === 'host' ? HOST_NOTE : onlineRole === 'join' ? JOIN_NOTE : ''; roomNote.classList.remove('warn'); }
+  const online = menuSection === 'online', manual = online && (onlineRole === 'host' || onlineRole === 'join');
+  document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('sel', x.dataset.mode === menuSection));
+  roomBox.classList.toggle('hidden', !online);
+  document.getElementById('practiceRow').classList.toggle('hidden', menuSection !== 'practice');
+  document.getElementById('hostPanel').classList.toggle('hidden', !(online && onlineRole === 'host'));
+  document.getElementById('joinPanel').classList.toggle('hidden', !(online && onlineRole === 'join'));
+  document.querySelectorAll('[data-role]').forEach(b => b.classList.toggle('sel', manual && b.dataset.role === onlineRole));
+  startBtn.classList.toggle('hidden', !manual);
+  startBtn.textContent = onlineRole === 'join' ? 'JOIN GAME' : 'HOST GAME';
+  if (!roomNote.dataset.custom) {
+    roomNote.textContent = !manual ? 'QUICK PLAY pairs you with the next pilot who is searching.' : onlineRole === 'host' ? HOST_NOTE : JOIN_NOTE;
+    roomNote.classList.remove('warn');
+  }
 }
 function setNote(text, warn = false) { roomNote.textContent = text; roomNote.dataset.custom = '1'; roomNote.classList.toggle('warn', warn); }
 function clearNote() { delete roomNote.dataset.custom; refreshMenu(); }
 
 hostCodeEl.textContent = generateRoomCode();
-if (inClaude()) document.getElementById('randomRole').hidden = true;   // quick match needs the open-web matchmaker
+if (inClaude()) document.getElementById('randomRole').hidden = true;   // quick play needs the open-web matchmaker
 codeInput.addEventListener('input', () => { codeInput.value = sanitizeCode(codeInput.value); clearNote(); });
 document.getElementById('newCode').addEventListener('click', () => { Sound.play('click'); hostCodeEl.textContent = generateRoomCode(); clearNote(); });
 document.querySelectorAll('[data-role]').forEach(b => b.addEventListener('click', () => {
   Sound.unlock(); Sound.play('click');
+  if (b.dataset.role === 'random') { quickPlay(); return; }          // QUICK PLAY starts right away
   onlineRole = b.dataset.role; clearNote();
   if (onlineRole === 'join') setTimeout(() => codeInput.focus(), 50);
 }));
@@ -2399,36 +2402,38 @@ function selectColor(key) {
   startBtn.style.setProperty('--accent', hex);
   document.getElementById('againBtn').style.setProperty('--accent', hex);
 }
-/* PRACTICE covers both offline modes: with the bot rival, or solo. */
-let practiceKind = 'bot';
+/* ONLINE / PRACTICE open their section; tapping the open one again closes it. */
 document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => {
   Sound.unlock(); Sound.play('click');
-  mode = b.dataset.mode === 'online' ? 'online' : (practiceKind === 'bot' ? 'bot' : 'practice');
-  refreshMenu();
+  menuSection = menuSection === b.dataset.mode ? null : b.dataset.mode;
+  if (menuSection === 'online' && onlineRole === 'random') onlineRole = null;
+  clearNote();
 }));
+/* PRACTICE → WITH BOT / SOLO start right away. */
 document.querySelectorAll('[data-practice]').forEach(b => b.addEventListener('click', () => {
   Sound.unlock(); Sound.play('click');
-  practiceKind = b.dataset.practice;
-  mode = practiceKind === 'bot' ? 'bot' : 'practice';
-  refreshMenu();
+  mode = b.dataset.practice === 'bot' ? 'bot' : 'practice';
+  menuEl.classList.add('hidden'); startGame();
 }));
 
-/* QUICK PLAY: straight into online matchmaking (same as ONLINE → RANDOM). */
-const quickBtn = document.getElementById('quickBtn');
-if (inClaude()) quickBtn.hidden = true;           // matchmaking needs the open-web version
-quickBtn.addEventListener('click', () => {
+/* LAUNCH / QUICK PLAY: straight into online matchmaking.
+   Inside Claude (no open-web matchmaker) LAUNCH starts a game against the bot instead. */
+function quickPlay() {
   Sound.unlock(); Sound.play('click');
-  mode = 'online'; onlineRole = 'random'; clearNote();
+  if (inClaude()) mode = 'bot';
+  else { mode = 'online'; onlineRole = 'random'; }
+  clearNote();
   menuEl.classList.add('hidden'); startGame();
-});
+}
+const quickBtn = document.getElementById('quickBtn');
+quickBtn.addEventListener('click', quickPlay);
 
 /* Invite links (?room=CODE) open straight into ONLINE → JOIN with the code filled in. */
 const inviteUrl = code => `${location.origin}${location.pathname}?room=${code}`;
 (() => {
   const invited = sanitizeCode(new URLSearchParams(location.search).get('room'));
   if (invited.length !== 4) return;
-  codeInput.value = invited; onlineRole = 'join';
-  document.querySelector('[data-mode="online"]').click();
+  codeInput.value = invited; onlineRole = 'join'; menuSection = 'online'; mode = 'online';
   setNote(`You're invited to room ${invited}. Pick a hull and tap JOIN GAME.`);
 })();
 
@@ -2506,6 +2511,7 @@ setSound(Sound.on);
 /* ---------- Launch ---------- */
 startBtn.addEventListener('click', () => {
   Sound.unlock();
+  mode = 'online';
   if (mode === 'online' && onlineRole === 'join' && currentCode().length !== 4) {
     setNote('Enter the 4-letter code your friend is hosting.', true); codeInput.focus(); return;
   }
