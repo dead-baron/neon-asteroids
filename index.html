@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-221738';
+const BUILD = '20260928-225124';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -939,6 +939,7 @@ const Sound = {
 try { Sound.on = localStorage.getItem('neonAsteroids.sound') !== 'off'; } catch (_) {}
 function setSound(on) {
   Sound.on = on;
+  try { if (Ads.push) Ads.push({ sound: on ? 'on' : 'off' }); } catch (_) {}   // (Ads is defined later in the file)
   try { localStorage.setItem('neonAsteroids.sound', on ? 'on' : 'off'); } catch (_) {}
   for (const id of ['soundBtn', 'soundBtn2']) { const b = document.getElementById(id); if (b) b.textContent = on ? 'SOUND: ON' : 'SOUND: OFF'; }
   if (on) { Sound.unlock(); Sound.play('click'); }
@@ -2867,7 +2868,54 @@ startBtn.addEventListener('click', () => {
   Sound.play('click');
   menuEl.classList.add('hidden'); startGame();
 });
-document.getElementById('againBtn').addEventListener('click', () => { Sound.unlock(); Sound.play('click'); overEl.classList.add('hidden'); startGame(); });
+/* ---------------------------------------------------------------------
+   ADS — Google AdSense H5 Games Ads (Ad Placement API).
+   Off until ADSENSE_CLIENT holds your publisher ID ("ca-pub-…"). Never runs inside Claude.
+   Placement follows Google's games policy: full-screen ads only at natural breaks —
+   here, after a finished match when you leave the result screen. Never during play, never
+   in the lobby, and never on an ONLINE rematch (your rival would be left waiting).
+   Google also rate-limits ads itself (see data-ad-frequency-hint).
+   Test mode: add ?adtest=1 to the address to see Google's test ads (no earnings).
+   --------------------------------------------------------------------- */
+const ADSENSE_CLIENT = '';                 // e.g. 'ca-pub-1234567890123456'
+const Ads = {
+  ready: false,
+  init() {
+    if (!ADSENSE_CLIENT || inClaude()) return;
+    const sc = document.createElement('script');
+    sc.async = true; sc.crossOrigin = 'anonymous';
+    sc.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=' + ADSENSE_CLIENT;
+    sc.setAttribute('data-ad-frequency-hint', '180s');          // at most one ad every 3 minutes
+    if (new URLSearchParams(location.search).get('adtest') === '1') sc.setAttribute('data-adbreak-test', 'on');
+    document.head.appendChild(sc);
+    window.adsbygoogle = window.adsbygoogle || [];
+    this.push = o => window.adsbygoogle.push(o);
+    this.push({ preloadAdBreaks: 'on', sound: Sound.on ? 'on' : 'off', onReady: () => { this.ready = true; } });
+    // ready only once Google's library has really loaded — with an ad blocker it never does,
+    // and the game simply carries on with no ads and no waiting.
+  },
+  /** Maybe show an ad, then always call next() (straight away if no ad is shown). */
+  between(name, next) {
+    if (!this.ready) { next(); return; }
+    let done = false;
+    const finish = () => { if (done) return; done = true; if (Sound.master) Sound.master.gain.value = 0.32; next(); };
+    const guard = setTimeout(finish, 60000);                     // never strand the player if the ad library hangs
+    try {
+      this.push({
+        type: 'next', name,
+        beforeAd: () => { if (Sound.master) Sound.master.gain.value = 0; },
+        adBreakDone: () => { clearTimeout(guard); finish(); },
+      });
+    } catch (_) { clearTimeout(guard); finish(); }
+  },
+};
+Ads.init();
+
+document.getElementById('againBtn').addEventListener('click', () => {
+  Sound.unlock(); Sound.play('click');
+  const go = () => { overEl.classList.add('hidden'); startGame(); };
+  if (mode === 'online') go(); else Ads.between('rematch', go);   // online rivals are waiting: no ad here
+});
 function backToMenu() {
   net.close(); leaveTimer = 0;
   closeMenu(true);
@@ -2875,7 +2923,7 @@ function backToMenu() {
   state = 'menu'; opp = null; joy.active = false; fire.held = false; seedAmbient();
   clearNote();
 }
-document.getElementById('menuBtn').addEventListener('click', () => { Sound.play('click'); backToMenu(); });
+document.getElementById('menuBtn').addEventListener('click', () => { Sound.play('click'); Ads.between('to-menu', backToMenu); });
 
 /* ---------- In-game menu: keep playing / surrender / quit ---------- */
 function openMenu() {
