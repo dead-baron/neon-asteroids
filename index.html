@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#05010f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="description" content="Neon vector Asteroids duel for phones. Best of 3, 30-second rounds, play a friend online.">
+<meta property="og:title" content="Neon Asteroids: Duel">
+<meta property="og:description" content="Steer with one thumb, fire with the other. Best of 3 against a friend or the bot.">
+<meta property="og:type" content="website">
+<title>Neon Asteroids</title>
+<!--
+  NEON ASTEROIDS — PvP duel edition (portrait, tuned for Pixel 7 Pro)
+  Canvas 2D + vanilla JS. No frameworks, no external assets.
+
+  Rules: best of 3 rounds, 30 s each. A ship takes 3 hits and explodes.
+  A round goes to the last ship flying, or, at the buzzer, to whoever
+  scored more by blasting rocks and UFOs. Round 1 is a light field,
+  round 2 a heavier one, round 3 the heaviest plus UFOs that shoot back.
+
+  Script sections:
+    1.  Config, tiers & palette
+    2.  Canvas setup
+    3.  Math helpers
+    4.  Particle system
+    5.  Neon vector drawing (ships with damage states, UFOs)
+    6.  World entities: ship, bullets, asteroids, UFOs
+    7.  Controls: floating joystick + FIRE button
+    8.  Networking: RoomAdapter (live), NullAdapter
+    9.  Opponents: RemotePlayer (online), BotShip (local AI)
+    10. Match flow: rounds, scoring, hits, wins
+    11. Fixed-timestep update + render
+    12. Menu wiring
+-->
+<style>
+  /* One deliberate look: a dark neon arcade screen in every theme. */
+  :root { color-scheme: dark; --bg: #05010f; --ink: #ffffff; --muted: #8b80c4; --line: #5a4aa8; --cyan: #00f0ff; }
+
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--ink);
+    overflow: hidden; overscroll-behavior: none; touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    font-family: "Courier New", ui-monospace, monospace;
+  }
+  canvas#game { position: fixed; inset: 0; width: 100vw; height: 100dvh; display: block; image-rendering: pixelated; }
+
+  .overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px;
+    padding: calc(env(safe-area-inset-top, 0px) + 18px) 16px calc(env(safe-area-inset-bottom, 0px) + 18px);
+    box-sizing: border-box;
+    background: radial-gradient(ellipse at center, rgba(20,6,50,.72) 0%, rgba(5,1,15,.92) 75%);
+    z-index: 10; text-align: center; overflow-y: auto; touch-action: pan-y;
+  }
+  .overlay.hidden { display: none; }
+
+  h1 {
+    margin: 0; font-size: clamp(32px, 10.5vw, 52px); letter-spacing: 4px; line-height: 1;
+    color: var(--ink); text-wrap: balance;
+    text-shadow: 0 0 6px #00f0ff, 0 0 18px #00f0ff, 0 0 36px #e100ff;
+  }
+  h1 small { display: block; font-size: .36em; letter-spacing: 9px; margin-top: 10px; color: #ff3f8e; text-shadow: 0 0 8px #ff3f8e; }
+  .label { font-size: 12px; letter-spacing: 3px; color: #9a8fd6; margin-bottom: -6px; }
+
+  /* Color grid: 12 neon hulls, 6 per row */
+  .dots { display: grid; grid-template-columns: repeat(6, 40px); gap: 12px 14px; }
+  .dot {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 3px solid transparent; padding: 0; cursor: pointer;
+    background: var(--c); box-shadow: 0 0 8px var(--c), 0 0 18px var(--c);
+    transition: transform .12s, border-color .12s;
+  }
+  .dot.sel { border-color: #fff; transform: scale(1.18); box-shadow: 0 0 12px var(--c), 0 0 30px var(--c), inset 0 0 6px #fff; }
+  .dot:focus-visible, .btn:focus-visible, #roomCode:focus-visible { outline: 2px dashed #fff; outline-offset: 4px; }
+  .dot-name { height: 16px; font-size: 13px; letter-spacing: 3px; color: var(--c, #fff); text-shadow: 0 0 8px var(--c, #fff); }
+
+  .modes { display: flex; gap: 8px; width: 100%; max-width: 360px; }
+  .modes .btn { flex: 1; min-width: 0; padding: 12px 4px; font-size: 14px; letter-spacing: 2px; }
+  .btn {
+    font: inherit; font-weight: bold; letter-spacing: 3px; font-size: 15px;
+    color: #fff; background: transparent; cursor: pointer;
+    border: 2px solid var(--line); border-radius: 6px; padding: 12px 16px; min-width: 120px;
+  }
+  .btn.sel { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 10px var(--cyan), inset 0 0 10px rgba(0,240,255,.35); }
+  .btn.go {
+    font-size: 22px; padding: 15px 44px; border-color: var(--accent, #00f0ff); color: var(--accent, #00f0ff);
+    box-shadow: 0 0 14px var(--accent, #00f0ff), inset 0 0 14px var(--accent, #00f0ff);
+    text-shadow: 0 0 8px var(--accent, #00f0ff);
+  }
+  .btn.small { min-width: 0; font-size: 13px; padding: 10px 12px; }
+  .btn:active { transform: scale(.96); }
+
+  .room { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .room.hidden { display: none; }
+  .code-row { display: flex; gap: 8px; align-items: stretch; }
+  #roomCode {
+    width: 7ch; font: inherit; font-weight: bold; font-size: 24px; letter-spacing: 8px; text-align: center;
+    text-transform: uppercase; color: var(--cyan); background: rgba(0,240,255,.06);
+    border: 2px solid var(--cyan); border-radius: 6px; padding: 6px 4px 6px 12px;
+    box-shadow: 0 0 10px rgba(0,240,255,.5);
+  }
+  .note { font-size: 12px; color: var(--muted); letter-spacing: 1px; line-height: 1.6; max-width: 330px; }
+  .note.warn { color: #ff9f1c; }
+
+  .hint { font-size: 12px; color: var(--muted); letter-spacing: 1px; line-height: 1.7; max-width: 340px; }
+  .hint b { color: #fff; }
+  #finalScore { font-size: 44px; color: #ffe600; text-shadow: 0 0 10px #ffe600, 0 0 30px #ff9f1c; font-variant-numeric: tabular-nums; }
+
+  #rotate { display: none; }
+  @media (orientation: landscape) and (max-height: 520px) {
+    #rotate { display: flex; z-index: 50; font-size: 20px; letter-spacing: 3px; color: var(--cyan); text-shadow: 0 0 10px var(--cyan); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot, .btn { transition: none; } }
+  #safeProbe { position: fixed; top: 0; left: 0; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); visibility: hidden; pointer-events: none; }
+</style>
+</head>
+<body>
+
+
+<canvas id="game"></canvas>
+<div id="safeProbe"></div>
+
+<!-- ================= START MENU ================= -->
+<div id="menu" class="overlay">
+  <h1>NEON<br>ASTEROIDS<small>DUEL·DRIFT</small></h1>
+
+  <div class="label">SELECT HULL</div>
+  <div class="dots" id="dots"></div>
+  <div class="dot-name" id="dotName">NEON PINK</div>
+
+  <div class="label">MODE</div>
+  <div class="modes">
+    <button class="btn sel" data-mode="bot">VS BOT</button>
+    <button class="btn"     data-mode="online">ONLINE</button>
+    <button class="btn"     data-mode="practice">PRACTICE</button>
+  </div>
+
+  <div class="room hidden" id="roomBox">
+    <div class="code-row">
+      <input id="roomCode" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code">
+      <button class="btn small" id="newCode">NEW CODE</button>
+    </div>
+    <button class="btn small" id="shareBtn" hidden>SHARE INVITE LINK</button>
+    <div class="note" id="roomNote">Send your rival this page. They pick ONLINE and type the same code.</div>
+    <div class="note" id="liveNote">LIVE LINK: CHECKING…</div>
+  </div>
+
+  <button class="btn go" id="startBtn">LAUNCH</button>
+
+  <div class="hint">
+    <b>Left thumb:</b> touch the bottom of the screen to steer. Push far to thrust.<br>
+    <b>Right thumb:</b> tap FIRE. Hold it for steady fire.<br>
+    Best of 3 · 30 s rounds · 3 hits and you're scrap.<br>
+    Last ship flying or most points wins the round.
+  </div>
+</div>
+
+<!-- ================= MATCH OVER ================= -->
+<div id="over" class="overlay hidden">
+  <h1 id="overTitle">VICTORY</h1>
+  <div id="finalScore">2 – 1</div>
+  <div class="hint" id="overInfo"></div>
+  <button class="btn go" id="againBtn">REMATCH</button>
+  <button class="btn" id="menuBtn">MENU</button>
+</div>
+
+<div id="rotate" class="overlay">ROTATE TO PORTRAIT ⟲</div>
+
+<!-- PeerJS: direct phone-to-phone links (used when the page is hosted on the open web,
+     e.g. GitHub Pages). Falls back to a second CDN if the first is blocked. -->
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"
+        onerror="var s=document.createElement('script');s.src='https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js';document.head.appendChild(s);"></script>
+<script>
+'use strict';
+
+/* =====================================================================
+   1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
+   ===================================================================== */
+const CFG = {
+  TICK_MS: 1000 / 60,
+  DRAG: 0.985,               // permanent linear drag
+  THRUST: 0.2,
+  MAX_SPEED: 7.5,
+  TURN_LERP: 0.28,
+  AIM_DEADZONE: 0.12,
+  THRUST_START: 0.4,         // below: aim only; above: aim + thrust
+
+  FIRE_COOLDOWN_MS: 140,     // fastest tapping rate
+  FIRE_REPEAT_MS: 260,       // steady rate while FIRE is held
+  BULLET_SPEED: 10.5,
+  BULLET_LIFE: 58,
+  BULLET_INHERIT: 0.5,
+  MAX_BULLETS: 140,
+
+  HULL: 3,                   // hits a ship can take
+  HIT_INVULN: 36,            // ticks of protection after a hit
+  ROCK_INVULN: 80,           // after bouncing off a rock
+  SHIP_R: 12,
+  SHIP_HIT_R: 13,
+
+  ROUND_MS: 30000,
+  INTRO_MS: 3000,
+  RESULT_MS: 3400,
+  WINS_NEEDED: 2,
+
+  UFO_SCORE: 150,
+  UFO_BULLET_SPEED: 4.6,
+  UFO_BULLET_LIFE: 120,
+  UFO_SHOTS: 4,
+
+  JOY_RADIUS: 64,
+  CONTROL_TOP: 0.4,          // controls live in the bottom 60%
+  FIRE_R: 44,
+
+  MAX_PARTICLES: 1800,
+  NET_SEND_HZ: 15,
+  INTERP_DELAY_MS: 130,
+  MAX_SYNC_ASTEROIDS: 80,
+};
+
+/** Round tiers. Round 4+ (after draws) reuses tier 3. */
+const TIERS = {
+  1: { large: 3, medium: 0, ufos: [],                  tag: 'LIGHT FIELD' },
+  2: { large: 5, medium: 3, ufos: [],                  tag: 'HEAVY FIELD' },
+  3: { large: 7, medium: 3, ufos: [3500, 11000, 19000], tag: 'UFOs INBOUND' },
+};
+const tierFor = rn => TIERS[Math.min(Math.max(rn, 1), 3)];
+
+const SHIP_COLORS = [
+  ['pink',    '#ff3f8e', 'NEON PINK'],
+  ['cyan',    '#00f0ff', 'CYAN'],
+  ['yellow',  '#ffe600', 'YELLOW'],
+  ['magenta', '#e100ff', 'MAGENTA'],
+  ['lime',    '#7dff3a', 'ACID LIME'],
+  ['orange',  '#ff8a1c', 'BLAZE ORANGE'],
+  ['red',     '#ff2d4b', 'LASER RED'],
+  ['blue',    '#2f7dff', 'ELECTRIC BLUE'],
+  ['mint',    '#3dffc5', 'MINT'],
+  ['violet',  '#9d6bff', 'ULTRAVIOLET'],
+  ['gold',    '#ffc93d', 'GOLD'],
+  ['white',   '#e9f3ff', 'ICE WHITE'],
+];
+const AST_COLORS = [null, '#b388ff', '#ff9f1c', '#39ff14'];
+const AST_RADIUS = [0, 14, 27, 44];
+const AST_SCORE  = [0, 100, 50, 20];
+const UFO_COLOR = '#ff3b30';
+
+/* =====================================================================
+   2. CANVAS SETUP (DPR capped at 2 to keep glow cheap on a 3.5x screen)
+   ===================================================================== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+const bg = document.createElement('canvas');
+let W = 0, H = 0, DPR = 1, SAFE_TOP = 0, SAFE_BOTTOM = 0;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  const cs = getComputedStyle(document.getElementById('safeProbe'));
+  SAFE_TOP = parseFloat(cs.paddingTop) || 0;
+  SAFE_BOTTOM = parseFloat(cs.paddingBottom) || 0;
+  buildBackground();
+}
+function buildBackground() {
+  bg.width = canvas.width; bg.height = canvas.height;
+  const g = bg.getContext('2d');
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.imageSmoothingEnabled = false;
+  g.fillStyle = '#05010f'; g.fillRect(0, 0, W, H);
+  const step = 32;
+  for (let i = 0, x = 0; x <= W; x += step, i++) { g.fillStyle = i % 4 === 0 ? 'rgba(110,60,255,0.22)' : 'rgba(80,40,190,0.10)'; g.fillRect(Math.round(x), 0, 1, H); }
+  for (let i = 0, y = 0; y <= H; y += step, i++) { g.fillStyle = i % 4 === 0 ? 'rgba(110,60,255,0.22)' : 'rgba(80,40,190,0.10)'; g.fillRect(0, Math.round(y), W, 1); }
+  for (let i = 0; i < 90; i++) {
+    g.fillStyle = `rgba(255,255,255,${(0.2 + Math.random() * 0.6).toFixed(2)})`;
+    const s = Math.random() < 0.15 ? 2 : 1;
+    g.fillRect(Math.floor(Math.random() * W), Math.floor(Math.random() * H), s, s);
+  }
+  const v = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.2, W / 2, H / 2, Math.max(W, H) * 0.75);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.65)');
+  g.fillStyle = v; g.fillRect(0, 0, W, H);
+}
+
+/* =====================================================================
+   3. MATH HELPERS
+   ===================================================================== */
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const snap = v => Math.round(v) + 0.5;
+function angDiff(a, b) { let d = (a - b) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; }
+function wrapDelta(d, size) { if (d > size / 2) d -= size; else if (d < -size / 2) d += size; return d; }
+function wrap(o) { if (o.x < 0) o.x += W; else if (o.x >= W) o.x -= W; if (o.y < 0) o.y += H; else if (o.y >= H) o.y -= H; }
+function wrapDist2(a, b) { const dx = wrapDelta(a.x - b.x, W), dy = wrapDelta(a.y - b.y, H); return dx * dx + dy * dy; }
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} };
+
+/* =====================================================================
+   4. PARTICLE SYSTEM — pooled, adapts to frame rate
+   ===================================================================== */
+const Particles = {
+  pool: [], count: 0, quality: 1,
+  init() { for (let i = 0; i < CFG.MAX_PARTICLES; i++) this.pool.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: '#fff', size: 2, drag: 0.96 }); },
+  emit(x, y, vx, vy, life, color, size, drag = 0.96) {
+    if (this.count >= CFG.MAX_PARTICLES) return;
+    const p = this.pool[this.count++];
+    p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.life = p.max = life; p.color = color; p.size = size; p.drag = drag;
+  },
+  burst(x, y, color, amount, speed, lifeBase = 40) {
+    const n = Math.max(4, Math.round(amount * this.quality));
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, s = rand(0.3, 1) * speed;
+      this.emit(x, y, Math.cos(a) * s, Math.sin(a) * s, Math.round(rand(0.5, 1) * lifeBase),
+        Math.random() < 0.18 ? '#ffffff' : color, Math.random() < 0.3 ? 3 : 2, 0.955);
+    }
+  },
+  update() {
+    const pool = this.pool;
+    for (let i = 0; i < this.count;) {
+      const p = pool[i];
+      p.x += p.vx; p.y += p.vy; p.vx *= p.drag; p.vy *= p.drag; wrap(p);
+      if (--p.life <= 0) { this.count--; pool[i] = pool[this.count]; pool[this.count] = p; } else i++;
+    }
+  },
+  draw() {
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < this.count; i++) {
+      const p = this.pool[i], t = p.life / p.max;
+      ctx.globalAlpha = t; ctx.fillStyle = p.color;
+      const s = Math.max(1, Math.round(p.size * (0.4 + t * 0.6)));
+      ctx.fillRect(Math.round(p.x - s / 2), Math.round(p.y - s / 2), s, s);
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  },
+  clear() { this.count = 0; }
+};
+
+/* =====================================================================
+   5. NEON VECTOR DRAWING
+   ===================================================================== */
+function neonPoly(pts, color, width = 2, glow = 16, closed = true) {
+  ctx.beginPath();
+  ctx.moveTo(snap(pts[0][0]), snap(pts[0][1]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(snap(pts[i][0]), snap(pts[i][1]));
+  if (closed) ctx.closePath();
+  ctx.lineJoin = 'miter';
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.shadowColor = color; ctx.shadowBlur = glow;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = Math.max(1, width * 0.4);
+  ctx.stroke();
+}
+function drawWrapped(x, y, r, fn) {
+  fn(x, y);
+  const ox = x < r ? W : x > W - r ? -W : 0, oy = y < r ? H : y > H - r ? -H : 0;
+  if (ox) fn(x + ox, y);
+  if (oy) fn(x, y + oy);
+  if (ox && oy) fn(x + ox, y + oy);
+}
+
+/** Hull outlines by remaining hull. Each hit bends, tears and cracks it further. */
+const SHIP_SHAPES = {
+  3: [[16, 0], [-10, -10], [-5, 0], [-10, 10]],
+  2: [[16, 0], [-10, -10], [-5, 0], [-8, 5], [-10, 10]],            // dented flank
+  1: [[14, 1], [-3, -6], [-7, -3], [-5, 0], [-7, 4], [-10, 10]],     // left wing torn off
+};
+const SHIP_CRACKS = {
+  3: [],
+  2: [[[4, -3], [-1, 1], [-5, -2]]],
+  1: [[[6, 2], [0, -1], [-3, 3]], [[-2, 5], [-6, 7]]],
+};
+function drawShip(x, y, a, color, thrust, tick, hp = CFG.HULL) {
+  hp = clamp(hp, 1, 3);
+  const c = Math.cos(a), s = Math.sin(a);
+  const T = ([px, py]) => [x + px * c - py * s, y + px * s + py * c];
+  // Badly damaged hulls flicker like a failing tube light
+  const col = hp === 1 && (tick % 9 < 2) ? '#ffffff' : color;
+  if (hp === 1) ctx.globalAlpha = 0.75 + 0.25 * Math.sin(tick * 0.9);
+  neonPoly(SHIP_SHAPES[hp].map(T), col, 2.2, hp === 3 ? 18 : 12);
+  for (const crack of SHIP_CRACKS[hp]) neonPoly(crack.map(T), '#ffffff', 1, 6, false);
+  ctx.globalAlpha = 1;
+  if (thrust > 0.05) {
+    const len = 8 + thrust * 14 * (0.7 + ((tick * 7) % 5) / 10);
+    neonPoly([[-7, -5], [-7 - len, 0], [-7, 5]].map(T), '#ffffff', 1.5, 14, false);
+  }
+}
+/** Sparks and smoke from damaged hulls. */
+function damageFx(o) {
+  if (!o.alive || o.hp >= 3) return;
+  const q = Particles.quality;
+  if (Math.random() < (o.hp === 2 ? 0.07 : 0.16) * q)
+    Particles.emit(o.x + rand(-6, 6), o.y + rand(-6, 6), rand(-1.6, 1.6), rand(-1.6, 1.6), 12, Math.random() < 0.5 ? '#ffe600' : '#ffffff', 2, 0.9);
+  if (o.hp === 1 && Math.random() < 0.4 * q)
+    Particles.emit(o.x - Math.cos(o.a) * 6 + rand(-3, 3), o.y - Math.sin(o.a) * 6 + rand(-3, 3),
+      o.vx * 0.3 + rand(-0.3, 0.3), o.vy * 0.3 + rand(-0.3, 0.3), 34, '#5b5470', 3, 0.97);
+}
+function explodeShip(x, y, color) {
+  Particles.burst(x, y, color, 110, 6.5, 65);
+  Particles.burst(x, y, '#ffffff', 40, 3.5, 45);
+  Particles.burst(x, y, '#ff9f1c', 30, 2.5, 50);
+  addRing(x, y, color, 130); addRing(x, y, '#ffffff', 70);
+  world.shake = 16;
+}
+function drawUfo(u, tick) {
+  const P = pts => pts.map(([px, py]) => [u.x + px, u.y + py]);
+  neonPoly(P([[-17, 0], [-8, -6], [8, -6], [17, 0], [8, 6], [-8, 6]]), UFO_COLOR, 2, 14);
+  neonPoly(P([[-6, -6], [-4, -11], [4, -11], [6, -6]]), UFO_COLOR, 1.5, 10, false);
+  neonPoly(P([[-17, 0], [17, 0]]), UFO_COLOR, 1, 6, false);
+  ctx.fillStyle = (tick >> 3) % 2 ? '#ffffff' : UFO_COLOR;          // blinking belly lights
+  for (const lx of [-9, 0, 9]) ctx.fillRect(Math.round(u.x + lx - 1), Math.round(u.y + 2), 2, 2);
+}
+
+/* =====================================================================
+   6. WORLD ENTITIES
+   ===================================================================== */
+const world = { asteroids: [], bullets: [], ufos: [], rings: [], shake: 0 };
+
+const ship = {
+  x: 0, y: 0, vx: 0, vy: 0, a: -Math.PI / 2, thrust: 0,
+  hp: CFG.HULL, alive: false, invuln: 0,
+  shots: 0,        // total shots fired; peers replay new ones
+  dealt: 0,        // hits I landed on my rival this round (online: rival applies them)
+  applied: 0,      // rival's hits on me already applied this round
+  lastDealt: -999,
+  color: '#ff3f8e', colorName: 'NEON PINK',
+};
+
+let nextAstId = Math.floor(Math.random() * 1e5);
+function makeAsteroid(x, y, size, speedMul = 1, id = nextAstId++ % 1e6) {
+  const r = mulberry32(id * 2654435761);                 // same outline on every client
+  const n = 7 + Math.floor(r() * 5), pts = [];
+  for (let i = 0; i < n; i++) pts.push({ a: (i / n) * TAU + (r() - 0.5) * 0.3, d: 0.7 + r() * 0.35 });
+  const dir = Math.random() * TAU, sp = rand(0.5, 1.2) * (1 + (3 - size) * 0.4) * speedMul;
+  return { id, x, y, vx: Math.cos(dir) * sp, vy: Math.sin(dir) * sp, r: AST_RADIUS[size], size,
+           rot: r() * TAU, spin: (r() - 0.5) * 0.05, pts, color: AST_COLORS[size], tx: undefined, ty: undefined };
+}
+function drawAsteroid(a) {
+  drawWrapped(a.x, a.y, a.r + 4, (x, y) =>
+    neonPoly(a.pts.map(p => [x + Math.cos(p.a + a.rot) * a.r * p.d, y + Math.sin(p.a + a.rot) * a.r * p.d]), a.color, 2, 12));
+}
+function explodeAsteroid(a) {
+  Particles.burst(a.x, a.y, a.color, 10 + a.size * 16, 2 + a.size * 1.3, 30 + a.size * 10);
+  addRing(a.x, a.y, a.color, a.r * 2.2);
+  world.shake = Math.max(world.shake, a.size * 2.5);
+}
+function explodeUfo(u) {
+  Particles.burst(u.x, u.y, UFO_COLOR, 50, 4.5, 45);
+  Particles.burst(u.x, u.y, '#ffffff', 20, 2.5, 30);
+  addRing(u.x, u.y, UFO_COLOR, 60);
+  world.shake = Math.max(world.shake, 6);
+}
+
+function spawnBullet(x, y, vx, vy, color, owner, life = CFG.BULLET_LIFE) {
+  if (world.bullets.length >= CFG.MAX_BULLETS) world.bullets.shift();
+  world.bullets.push({ x, y, vx, vy, life, color, owner });
+}
+function shootFrom(o, color, owner) {
+  const c = Math.cos(o.a), s = Math.sin(o.a);
+  spawnBullet(o.x + c * 16, o.y + s * 16, c * CFG.BULLET_SPEED + o.vx * CFG.BULLET_INHERIT,
+    s * CFG.BULLET_SPEED + o.vy * CFG.BULLET_INHERIT, color, owner);
+}
+function fireLocal() { shootFrom(ship, ship.color, 'local'); ship.shots++; }
+
+function drawBullets() {
+  ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'square';
+  for (const b of world.bullets) {
+    const sp = Math.hypot(b.vx, b.vy) || 1, len = b.owner === 'ufo' ? 4 : 7;
+    const tx = b.x - (b.vx / sp) * len, ty = b.y - (b.vy / sp) * len;
+    ctx.strokeStyle = b.color; ctx.globalAlpha = 0.45; ctx.lineWidth = b.owner === 'ufo' ? 8 : 6;
+    ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = 1; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(tx, ty); ctx.stroke();
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+function addRing(x, y, color, max) { world.rings.push({ x, y, r: 4, max, color, life: 1 }); }
+const spark = (x, y) => Particles.burst(x, y, '#ffffff', 5, 2, 14);
+
+/* =====================================================================
+   7. CONTROLS
+   Left thumb: floating joystick anywhere in the bottom 60% (except the
+   FIRE button). Small push aims, big push aims + thrusts. Right thumb:
+   FIRE button, tap per shot, hold for steady fire. Both work at once.
+   Desktop: drag with the mouse, Space to fire.
+   ===================================================================== */
+const joy = { active: false, id: null, bx: 0, by: 0, kx: 0, ky: 0, mag: 0, angle: 0 };
+const fire = { held: false, id: null, lastShot: -1e9, repeatAcc: 0, pulse: 0 };
+let hintAlpha = 1, now = 0;
+
+const fireBtn = () => ({ x: W - CFG.FIRE_R - 26, y: H - CFG.FIRE_R - 40 - SAFE_BOTTOM });
+function onFireButton(x, y) { const f = fireBtn(); return Math.hypot(x - f.x, y - f.y) < CFG.FIRE_R + 16; }
+
+function canFly() { return state === 'play' && ship.alive && (match.ph === 'play' || match.ph === 'wait'); }
+function tryFire() {
+  if (!canFly()) return;
+  if (now - fire.lastShot < CFG.FIRE_COOLDOWN_MS) return;
+  fire.lastShot = now; fire.repeatAcc = 0; fire.pulse = 1;
+  fireLocal();
+}
+function firePress(id) { if (state !== 'play') return; fire.held = true; fire.id = id; tryFire(); }
+function fireRelease(id) { if (fire.id === id) { fire.held = false; fire.id = null; } }
+
+function joyStart(id, x, y) {
+  if (state !== 'play' || joy.active || y < H * CFG.CONTROL_TOP) return;
+  joy.active = true; joy.id = id; joy.bx = joy.kx = x; joy.by = joy.ky = y; joy.mag = 0;
+}
+function joyMove(id, x, y) {
+  if (!joy.active || joy.id !== id) return;
+  const dx = x - joy.bx, dy = y - joy.by, d = Math.hypot(dx, dy);
+  const k = d > CFG.JOY_RADIUS ? CFG.JOY_RADIUS / d : 1;
+  joy.kx = joy.bx + dx * k; joy.ky = joy.by + dy * k;
+  joy.mag = Math.min(d / CFG.JOY_RADIUS, 1);
+  if (d > 2) joy.angle = Math.atan2(dy, dx);
+}
+function joyEnd(id) { if (joy.id === id) { joy.active = false; joy.id = null; joy.mag = 0; } }
+
+function pointerDown(id, x, y) { if (onFireButton(x, y)) firePress(id); else joyStart(id, x, y); }
+function pointerUp(id) { fireRelease(id); joyEnd(id); }
+
+canvas.addEventListener('touchstart', e => { e.preventDefault(); for (const t of e.changedTouches) pointerDown(t.identifier, t.clientX, t.clientY); }, { passive: false });
+canvas.addEventListener('touchmove',  e => { e.preventDefault(); for (const t of e.changedTouches) joyMove(t.identifier, t.clientX, t.clientY); }, { passive: false });
+const touchEnd = e => { e.preventDefault(); for (const t of e.changedTouches) pointerUp(t.identifier); };
+canvas.addEventListener('touchend', touchEnd, { passive: false });
+canvas.addEventListener('touchcancel', touchEnd, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('dblclick', e => e.preventDefault());
+canvas.addEventListener('mousedown', e => pointerDown('mouse', e.clientX, e.clientY));
+window.addEventListener('mousemove', e => joyMove('mouse', e.clientX, e.clientY));
+window.addEventListener('mouseup', () => pointerUp('mouse'));
+window.addEventListener('keydown', e => { if (e.code === 'Space' && !e.repeat) { e.preventDefault(); firePress('key'); } });
+window.addEventListener('keyup', e => { if (e.code === 'Space') fireRelease('key'); });
+
+function drawControls() {
+  // FIRE button
+  const f = fireBtn(), col = ship.color, p = fire.pulse;
+  ctx.globalAlpha = fire.held ? 0.9 : 0.55;
+  ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.shadowColor = col; ctx.shadowBlur = 16 + p * 20;
+  ctx.beginPath(); ctx.arc(f.x, f.y, CFG.FIRE_R + p * 5, 0, TAU); ctx.stroke();
+  if (fire.held) { ctx.globalAlpha = 0.22; ctx.fillStyle = col; ctx.fill(); }
+  ctx.shadowBlur = 0; ctx.globalAlpha = canFly() ? 1 : 0.35;
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 15px "Courier New", monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('FIRE', f.x, f.y); ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha = 1;
+
+  if (!joy.active) {
+    if (hintAlpha <= 0) return;
+    const y = Math.round(H * CFG.CONTROL_TOP) + 0.5;
+    ctx.globalAlpha = 0.25 * hintAlpha;
+    ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = col; ctx.font = 'bold 13px "Courier New", monospace'; ctx.textAlign = 'center';
+    ctx.fillText('▼ STEER ZONE ▼', W / 2, y + 22);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  hintAlpha = Math.max(0, hintAlpha - 0.02);
+  ctx.globalAlpha = 0.5;
+  ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.shadowColor = col; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.arc(joy.bx, joy.by, CFG.JOY_RADIUS, 0, TAU); ctx.stroke();
+  ctx.shadowBlur = 0; ctx.globalAlpha = 0.2; ctx.setLineDash([4, 6]);
+  ctx.beginPath(); ctx.arc(joy.bx, joy.by, CFG.JOY_RADIUS * CFG.THRUST_START, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  ctx.globalAlpha = 0.4; ctx.beginPath(); ctx.moveTo(joy.bx, joy.by); ctx.lineTo(joy.kx, joy.ky); ctx.stroke();
+  ctx.globalAlpha = 0.9; ctx.fillStyle = col; ctx.shadowBlur = 20;
+  ctx.beginPath(); ctx.arc(joy.kx, joy.ky, 20, 0, TAU); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(joy.kx, joy.ky, 7, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/* =====================================================================
+   8. NETWORKING
+   ---------------------------------------------------------------------
+   Every player shares one presence object (~15x/s):
+     { v, on, col, x, y, vx, vy, a, t, al, hp, sh, dmg, dr, hs,
+       [host only] ast, ufo, m }
+   - sh:  shot counter. Peers replay new shots from that ship's nose.
+   - dmg: hits this player landed on their rival in round `dr`. The
+          SHOOTER decides hits (what you see is what you hit); the victim
+          applies new ones to their own hull.
+   - hp/al: the victim owns their hull and reports it.
+   - ast/ufo/m: the host owns rocks, UFOs, the clock, scores and wins.
+   Coordinates travel as 0..10000 of the screen so different phones
+   share one playfield.
+   ===================================================================== */
+class NetAdapter {
+  constructor() { this.handlers = {}; this.connected = false; this.isHost = true; this.myId = 'me'; this.status = ''; this.lastShots = new Map(); }
+  on(type, fn) { (this.handlers[type] ||= []).push(fn); return this; }
+  emit(type, msg) { (this.handlers[type] || []).forEach(fn => fn(msg)); }
+  connect() {} publish() {} close() { this.connected = false; }
+
+  /** Turn one rival presence object into game events. Input is untrusted: shape-check everything. */
+  _ingest(peerId, s) {
+    if (!s || typeof s !== 'object' || s.v !== 1 || !s.on) { this.lastShots.delete(peerId); this.emit('leave', { id: peerId }); return false; }
+    const m = {
+      id: peerId, col: typeof s.col === 'string' && /^#[0-9a-f]{6}$/i.test(s.col) ? s.col : '#ffffff',
+      x: dx_(+s.x || 0), y: dy_(+s.y || 0), vx: dvx(+s.vx || 0), vy: dvy(+s.vy || 0),
+      a: (+s.a || 0) / 1000, thr: clamp((+s.t || 0) / 100, 0, 1), alive: !!s.al,
+      hp: clamp(+s.hp || 0, 0, CFG.HULL), dmg: Math.max(0, +s.dmg || 0), dr: +s.dr || 0,
+    };
+    this.emit('state', m);
+    const sh = +s.sh || 0, prev = this.lastShots.get(peerId);
+    if (prev !== undefined && sh > prev && m.alive) {
+      const c = Math.cos(m.a), sn = Math.sin(m.a);
+      for (let i = 0; i < Math.min(3, sh - prev); i++) this.emit('fire', {
+        id: peerId, x: m.x + c * 16, y: m.y + sn * 16,
+        vx: c * CFG.BULLET_SPEED + m.vx * CFG.BULLET_INHERIT, vy: sn * CFG.BULLET_SPEED + m.vy * CFG.BULLET_INHERIT,
+      });
+    }
+    this.lastShots.set(peerId, sh);
+    return true;
+  }
+  /** Guests: pass the host's rocks, UFOs and match state to the game. */
+  _hostSnapshot(s) {
+    this.emit('snapshot', { ast: Array.isArray(s.ast) ? s.ast : [], ufo: Array.isArray(s.ufo) ? s.ufo : [], m: s.m && typeof s.m === 'object' ? s.m : null });
+  }
+}
+class NullAdapter extends NetAdapter {}
+
+const nx = x => Math.round(x / W * 1e4), ny = y => Math.round(y / H * 1e4);
+const nvx = v => Math.round(v / W * 1e5), nvy = v => Math.round(v / H * 1e5);
+const dx_ = x => x / 1e4 * W, dy_ = y => y / 1e4 * H;
+const dvx = v => v / 1e5 * W, dvy = v => v / 1e5 * H;
+
+/** The page's live room channel; null when not opened inside Claude. */
+const roomApiPromise = (window.claude && typeof window.claude.use === 'function')
+  ? window.claude.use('room').catch(() => null) : Promise.resolve(null);
+
+/**
+ * Shared-channel fallback: when a private per-code room can't be opened,
+ * everyone meets in the page's shared channel and only pilots whose
+ * presence carries the same room code (`rc`) count.
+ */
+function lobbyRoom(api, code) {
+  const mine = p => p.sameTab || (p.presence && p.presence.rc === code);
+  // Anyone who drops the code (or switches codes) counts as having left
+  const filt = ch => ({ peers: ch.peers.filter(mine), joined: ch.joined.filter(mine), updated: ch.updated.filter(mine),
+                        left: ch.left.concat(ch.updated.filter(p => !mine(p))) });
+  return {
+    shared: true,
+    onPeers: (h, err) => api.onPeers(ch => h(filt(ch)), err),
+    onConnection: (h, err) => api.onConnection(h, err),
+    connected: () => api.connected(),
+    peers: () => api.peers().filter(mine),
+    presence: obj => api.presence({ ...obj, rc: code }),
+    leave: () => api.presence({ v: 0, on: 0, rc: null }),
+  };
+}
+
+class RoomAdapter extends NetAdapter {
+  async connect(code) {
+    this.closed = false; this.status = 'CONNECTING…';
+    this.lastShots = new Map(); this.lastHostPresence = null; this.hostId = null;
+    this.settled = false; this.claiming = false;
+    this.diag = { link: 'waiting', room: '-', err: '' };
+    const api = await roomApiPromise;
+    if (this.closed) return;
+    if (!api) {
+      this.diag.link = 'none';
+      this.status = 'NO LIVE LINK IN THIS VIEWER · OPEN THE LINK IN CHROME OR SAFARI, SIGNED IN TO CLAUDE.AI';
+      return;
+    }
+    this.diag.link = 'yes';
+    // Everyone meets in the page's one shared channel; the room code filters who counts.
+    // (Private per-code rooms left some devices unable to see each other.)
+    this.api = api; this.code = code;
+    this.room = lobbyRoom(api, code); this.diag.room = 'shared';
+    if (this.closed) { this.room.leave().catch(() => {}); return; }
+    this.status = ''; this.connected = this.room.connected();
+    const onErr = e => {
+      this.diag.err = 'peers:' + ((e && e.code) || 'error'); this.connected = false;
+      this.status = e && (e.code === 'not_granted' || e.code === 'revoked')
+        ? 'THIS VIEW CAN\'T GO ONLINE · SIGN IN TO CLAUDE AND OPEN THE PAGE THERE' : 'CONNECTION LOST';
+    };
+    this.unsubs = [
+      this.room.onPeers(ch => this._onPeers(ch), onErr),
+      this.room.onConnection(c => { this.connected = c; }, onErr),
+    ];
+    setTimeout(() => {
+      if (this.closed || !this.room) return;
+      const others = this.room.peers().filter(p => !p.sameTab && p.presence && p.presence.v === 1 && p.presence.on);
+      if (others.length >= 2) { this.emit('full', {}); return; }         // duels are 1v1
+      this.settled = true; this._elect(this.room.peers());
+    }, 1500);
+  }
+  _onPeers(ch) {
+    for (const p of ch.left) { this.lastShots.delete(p.peer); this.emit('leave', { id: p.peer }); }
+    for (const p of [...ch.joined, ...ch.updated]) {
+      if (p.sameTab) { this.myId = p.peer; continue; }
+      this._ingest(p.peer, p.presence);
+    }
+    this._elect(ch.peers);
+  }
+  /** Host election, identical everywhere: a player already hosting keeps it;
+   *  otherwise the lowest peer id. Newcomers can't claim for 1.5 s. */
+  _elect(peers) {
+    const inGame = p => p.sameTab || (p.presence && p.presence.v === 1 && p.presence.on);
+    const claims = p => p.sameTab ? this.claiming : !!p.presence.hs;
+    const players = peers.filter(inGame);
+    const pool = players.some(claims) ? players.filter(claims) : players;
+    let host = null;
+    for (const p of pool) if (!host || p.peer < host.peer) host = p;
+    this.hostId = host ? host.peer : null;
+    this.isHost = !host || host.sameTab;
+    this.claiming = this.isHost && this.settled;
+    if (!this.isHost && host.presence !== this.lastHostPresence) {
+      this.lastHostPresence = host.presence;
+      this._hostSnapshot(host.presence);
+    }
+  }
+  publish(obj) {
+    if (!this.room || this.closed) return;
+    this.room.presence(obj).then(() => { if (this.diag.err.startsWith('send:')) this.diag.err = ''; })
+      .catch(e => { this.diag.err = 'send:' + ((e && e.code) || 'error'); });
+  }
+  /** One-line connection report shown while waiting, so problems are visible. */
+  report() {
+    const d = this.diag || {};
+    if (!this.api || !this.room) return `LINK ${d.link}` + (d.err ? ` · ${d.err}` : '');
+    const all = this.api.peers();
+    const onCode = this.room.peers().length;
+    const others = [...new Set(all.filter(p => !p.sameTab && p.presence && p.presence.on && typeof p.presence.rc === 'string' && p.presence.rc !== this.code).map(p => p.presence.rc.slice(0, 4)))];
+    return `LINK yes · ${this.connected ? 'CONNECTED' : 'NOT CONNECTED'} · SCREENS ON PAGE ${all.length} · ON YOUR CODE ${onCode}`
+      + (others.length ? ` · OTHER CODES IN USE: ${others.join(' ')}` : '') + (d.err ? ` · ${d.err}` : '');
+  }
+  close() {
+    super.close(); this.closed = true;
+    (this.unsubs || []).forEach(u => u());
+    if (this.room) this.room.leave().catch(() => {});
+    this.room = null;
+  }
+}
+
+/* ---------------------------------------------------------------------
+   PeerAdapter — direct phone-to-phone play over WebRTC via PeerJS.
+   Used when the page runs on the open web (GitHub Pages). No accounts.
+
+   Room code → a well-known host id ("neon-asteroids-duel-v1-abcd").
+   The first phone to claim that id on the free PeerJS matchmaking server
+   hosts; the next phone finds it taken and connects to it instead.
+   After that the two phones talk directly (the server only introduces
+   them). Each side sends the same presence object the Claude version
+   uses, ~15x/s, so all game logic is shared.
+   --------------------------------------------------------------------- */
+const PEER_PREFIX = 'neon-asteroids-duel-v1-';
+const PeerCtor = () => window.Peer || (window.peerjs && window.peerjs.Peer) || null;
+/** Matchmaking options. `?peerhost=host:port` points at a self-hosted PeerJS server. */
+function peerOptions() {
+  const opts = { debug: 0, config: { iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' },
+  ] } };
+  const custom = new URLSearchParams(location.search).get('peerhost');
+  if (custom) {
+    const [h, p] = custom.split(':');
+    Object.assign(opts, { host: h, port: +p || 9000, path: '/', secure: location.protocol === 'https:' && h !== 'localhost' });
+  }
+  return opts;
+}
+
+class PeerAdapter extends NetAdapter {
+  connect(code) {
+    this.closed = false; this.code = code; this.hostId = PEER_PREFIX + code.toLowerCase();
+    this.conn = null; this.remoteId = null; this.lastHeard = 0; this.attempt = 0;
+    this.status = 'CONNECTING…'; this.diag = { role: 'starting', err: '' };
+    this._tryHost();
+  }
+  _tryHost() {
+    if (this.closed) return;
+    const P = PeerCtor();
+    if (!P) {                                             // library still loading (or blocked)
+      if (++this.attempt > 20) { this.status = 'COULD NOT LOAD THE MULTIPLAYER LIBRARY · CHECK YOUR CONNECTION'; return; }
+      setTimeout(() => this._tryHost(), 500); return;
+    }
+    this.diag.role = 'claiming room';
+    const peer = new P(this.hostId, peerOptions()); this.peer = peer;
+    peer.on('open', () => {
+      if (this.closed) { peer.destroy(); return; }
+      this.isHost = true; this.myId = peer.id; this.connected = true; this.status = ''; this.diag.role = 'host'; this.diag.err = '';
+    });
+    peer.on('connection', c => this._onIncoming(c));
+    peer.on('disconnected', () => { if (!this.closed && !peer.destroyed) { try { peer.reconnect(); } catch (_) {} } });
+    peer.on('error', e => {
+      if (this.closed) return;
+      if (e.type === 'unavailable-id') { peer.destroy(); this._tryJoin(); }   // someone is hosting: join them
+      else if (e.type !== 'peer-unavailable') this._fail(e);
+    });
+  }
+  _tryJoin() {
+    if (this.closed) return;
+    const P = PeerCtor();
+    this.diag.role = 'joining'; this.isHost = false;
+    const peer = new P(undefined, peerOptions()); this.peer = peer;
+    peer.on('open', id => {
+      if (this.closed) { peer.destroy(); return; }
+      this.myId = id;
+      const c = peer.connect(this.hostId, { reliable: false, serialization: 'json' });
+      const timer = setTimeout(() => { if (!this.conn && !this.closed) { this.diag.err = 'host not answering'; peer.destroy(); this._retry(); } }, 8000);
+      c.on('open', () => { clearTimeout(timer); if (this.closed) return; this._attach(c); this.connected = true; this.status = ''; this.diag.role = 'guest'; this.diag.err = ''; });
+    });
+    peer.on('error', e => {
+      if (this.closed) return;
+      if (e.type === 'peer-unavailable') { peer.destroy(); this._retry(); }  // host id just freed: try hosting again
+      else this._fail(e);
+    });
+  }
+  _retry() { if (this.closed) return; this.status = 'CONNECTING…'; setTimeout(() => this._tryHost(), 1200 + Math.random() * 800); }
+  _fail(e) {
+    this.diag.err = e.type || 'error'; this.connected = false;
+    this.status = ['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)
+      ? 'CAN\'T REACH THE MATCHMAKING SERVER · RETRYING…' : e.type === 'browser-incompatible'
+      ? 'THIS BROWSER CAN\'T DO DIRECT LINKS · TRY CHROME OR SAFARI' : `CONNECTION PROBLEM (${e.type || 'error'}) · RETRYING…`;
+    if (e.type === 'browser-incompatible') return;
+    setTimeout(() => { if (!this.closed) { try { this.peer && this.peer.destroy(); } catch (_) {} this._tryHost(); } }, 3000);
+  }
+  _onIncoming(c) {
+    if (this.conn && this.conn.open) {                     // duels are 1v1
+      c.on('open', () => { try { c.send({ full: 1 }); } catch (_) {} setTimeout(() => c.close(), 400); });
+      return;
+    }
+    c.on('open', () => this._attach(c));
+  }
+  _attach(c) {
+    this.conn = c; this.remoteId = c.peer; this.lastHeard = performance.now();
+    c.on('data', d => {
+      if (c !== this.conn) return;
+      this.lastHeard = performance.now();
+      if (d && d.full) { this.emit('full', {}); return; }
+      if (this._ingest(this.remoteId, d) && !this.isHost) this._hostSnapshot(d);
+    });
+    c.on('close', () => this._lost(c));
+    c.on('error', () => this._lost(c));
+  }
+  _lost(c) {
+    if (c !== this.conn) return;
+    const id = this.remoteId; this.conn = null;
+    this.lastShots.delete(id); this.emit('leave', { id });
+    if (!this.isHost && !this.closed) { try { this.peer.destroy(); } catch (_) {} this._retry(); }   // host gone: take over the room
+  }
+  publish(obj) {
+    const c = this.conn;
+    if (!c || !c.open || this.closed) return;
+    if (performance.now() - this.lastHeard > 5000) { try { c.close(); } catch (_) {} this._lost(c); return; }  // rival went silent
+    try { c.send(obj); } catch (_) {}
+  }
+  report() {
+    const d = this.diag || {};
+    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.conn ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.err ? ` · ${d.err}` : '');
+  }
+  close() {
+    super.close(); this.closed = true;
+    if (this.conn) { try { this.conn.send({ v: 1, on: 0 }); } catch (_) {} }
+    const p = this.peer, c = this.conn;
+    this.conn = null;
+    setTimeout(() => { try { c && c.close(); } catch (_) {} try { p && p.destroy(); } catch (_) {} }, 150);
+  }
+}
+
+/** Direct links when on the open web; Claude's live channel inside Claude. */
+const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
+
+function generateRoomCode() {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = ''; for (let i = 0; i < 4; i++) s += A[Math.floor(Math.random() * A.length)];
+  return s;
+}
+
+/* =====================================================================
+   9. OPPONENTS
+   ===================================================================== */
+/** Online rival: snapshot interpolation of their presence. */
+class RemotePlayer {
+  constructor(id, color) {
+    this.id = id; this.color = color; this.snaps = [];
+    this.x = W / 2; this.y = H / 2; this.vx = 0; this.vy = 0; this.a = 0; this.thr = 0;
+    this.hp = CFG.HULL; this.alive = true; this.visible = false; this.label = 'RIVAL'; this.owner = 'r:' + id;
+  }
+  push(m) {
+    this.snaps.push({ t: performance.now(), x: m.x, y: m.y, vx: m.vx, vy: m.vy, a: m.a, thr: m.thr });
+    if (this.snaps.length > 32) this.snaps.shift();
+    this.color = m.col;
+    if (this.visible && m.hp < this.hp && m.hp > 0) { Particles.burst(this.x, this.y, this.color, 18, 3, 25); world.shake = Math.max(world.shake, 5); }
+    if (this.visible && this.alive && !m.alive) explodeShip(this.x, this.y, this.color);
+    this.hp = m.hp; this.alive = m.alive; this.visible = true;
+  }
+  sample(t) {
+    const n = this.snaps.length; if (!n) return;
+    const rt = t - CFG.INTERP_DELAY_MS;
+    for (let i = n - 1; i > 0; i--) {
+      const a = this.snaps[i - 1], b = this.snaps[i];
+      if (a.t <= rt && rt <= b.t) {
+        const k = (rt - a.t) / (b.t - a.t || 1);
+        this.x = a.x + wrapDelta(b.x - a.x, W) * k; this.y = a.y + wrapDelta(b.y - a.y, H) * k;
+        this.a = a.a + angDiff(b.a, a.a) * k; this.vx = b.vx; this.vy = b.vy; this.thr = b.thr;
+        wrap(this); return;
+      }
+    }
+    const last = this.snaps[n - 1], ticks = clamp(rt - last.t, 0, 250) / CFG.TICK_MS;
+    this.x = last.x + last.vx * ticks; this.y = last.y + last.vy * ticks;
+    this.a = last.a; this.vx = last.vx; this.vy = last.vy; this.thr = last.thr; wrap(this);
+  }
+  update() {
+    if (!this.visible || !this.alive) return;
+    this.sample(performance.now());
+    emitExhaust(this.x, this.y, this.vx, this.vy, this.a, this.thr, this.color);
+    damageFx(this);
+  }
+  draw(tick) {
+    if (!this.visible || !this.alive || this.goneAt) return;
+    this.sample(performance.now());
+    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, this.a, this.color, this.thr, tick, this.hp));
+  }
+}
+
+/** Local AI rival: hunts you, farms rocks, dodges, and misses a little. */
+class BotShip {
+  constructor(color) { this.isBot = true; this.color = color; this.label = 'BOT'; this.owner = 'bot'; this.reset(); }
+  reset() {
+    this.x = W / 2; this.y = H * 0.2; this.vx = this.vy = 0; this.a = Math.PI / 2; this.thr = 0;
+    this.hp = CFG.HULL; this.alive = true; this.invuln = 0; this.cd = 600; this.retarget = 0; this.aimErr = 0; this.hunt = true;
+  }
+  damage() {
+    if (!this.alive || this.invuln > 0 || match.ph !== 'play') return;
+    this.hp--; this.invuln = CFG.HIT_INVULN;
+    Particles.burst(this.x, this.y, this.color, 18, 3, 25); world.shake = Math.max(world.shake, 5);
+    if (this.hp <= 0) { this.alive = false; explodeShip(this.x, this.y, this.color); }
+  }
+  update() {
+    if (!this.alive || match.ph === 'intro') return;
+    if (this.invuln > 0) this.invuln--;
+    const live = match.ph === 'play';
+    if (--this.retarget <= 0) { this.retarget = rand(80, 150); this.hunt = ship.alive && Math.random() < 0.55; }
+    let tx, ty;
+    if (this.hunt && ship.alive) { tx = ship.x + ship.vx * 12; ty = ship.y + ship.vy * 12; }
+    else {
+      let bd = Infinity;
+      for (const t of [...world.asteroids, ...world.ufos]) { const d = wrapDist2(t, this); if (d < bd) { bd = d; tx = t.x; ty = t.y; } }
+    }
+    let avoid = null;
+    for (const a of world.asteroids) if (Math.sqrt(wrapDist2(a, this)) - a.r < 42) { avoid = a; break; }
+    let want;
+    if (avoid) { want = Math.atan2(wrapDelta(this.y - avoid.y, H), wrapDelta(this.x - avoid.x, W)); this.thr = 0.9; }
+    else if (tx !== undefined) {
+      const ddx = wrapDelta(tx - this.x, W), ddy = wrapDelta(ty - this.y, H), dist = Math.hypot(ddx, ddy);
+      want = Math.atan2(ddy, ddx); this.thr = dist > 240 ? 0.6 : dist < 110 ? 0 : 0.12;
+    } else this.thr = 0;
+    if (!live) this.thr = 0;
+    if (want !== undefined) this.a += angDiff(want + (avoid ? 0 : this.aimErr), this.a) * 0.1;
+    this.vx += Math.cos(this.a) * CFG.THRUST * this.thr; this.vy += Math.sin(this.a) * CFG.THRUST * this.thr;
+    this.vx *= CFG.DRAG; this.vy *= CFG.DRAG;
+    const sp = Math.hypot(this.vx, this.vy);
+    if (sp > CFG.MAX_SPEED) { this.vx *= CFG.MAX_SPEED / sp; this.vy *= CFG.MAX_SPEED / sp; }
+    this.x += this.vx; this.y += this.vy; wrap(this);
+    this.cd -= CFG.TICK_MS;
+    if (live && !avoid && want !== undefined && Math.abs(angDiff(want, this.a)) < 0.22 && this.cd <= 0) {
+      shootFrom(this, this.color, 'bot');
+      this.cd = rand(320, 560); this.aimErr = rand(-0.13, 0.13);
+    }
+    emitExhaust(this.x, this.y, this.vx, this.vy, this.a, this.thr, this.color);
+    damageFx(this);
+  }
+  draw(tick) {
+    if (!this.alive || (this.invuln > 0 && (tick >> 3) % 2 === 0)) return;
+    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, this.a, this.color, this.thr, tick, this.hp));
+  }
+}
+
+function emitExhaust(x, y, vx, vy, angle, thrust, color) {
+  if (thrust <= 0.05) return;
+  const c = Math.cos(angle), s = Math.sin(angle), n = Math.ceil(thrust * 4 * Particles.quality);
+  for (let i = 0; i < n; i++) {
+    const spread = rand(-0.35, 0.35), sp = 1.5 + Math.random() * 3.5 * thrust;
+    Particles.emit(x - c * 8 + rand(-2, 2), y - s * 8 + rand(-2, 2),
+      vx * 0.6 + Math.cos(angle + Math.PI + spread) * sp, vy * 0.6 + Math.sin(angle + Math.PI + spread) * sp,
+      Math.round(rand(14, 26) * (0.5 + thrust * 0.5)), Math.random() < 0.3 ? '#ffffff' : color, Math.random() < 0.5 ? 2 : 3, 0.93);
+  }
+}
+
+/* =====================================================================
+   10. MATCH FLOW
+   match.ph: 'wait' (online, no rival yet) → 'intro' (3-2-1) → 'play'
+   (30 s) → 'result' → next round … → 'final'. The host (or this phone,
+   vs the bot / in practice) runs it; online guests mirror it.
+   From each player's own view: wins[0]/sc[0] = me, [1] = rival.
+   ===================================================================== */
+let state = 'menu';                // 'menu' | 'play' | 'over'
+let mode = 'bot';                  // 'bot' | 'online' | 'practice'
+let paused = false, tickCount = 0, netAcc = 0, leaveTimer = 0, flashTimer = 0;
+let net = new NullAdapter();
+let opp = null;                    // BotShip | RemotePlayer | null
+const remotes = new Map();
+let roomCode = '', wasHost = true, awaitingFirstSnap = false, practiceTotal = 0;
+const match = { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false };
+
+const isAuthority = () => mode !== 'online' || net.isHost;
+
+function spawnPoint() {
+  const top = mode === 'online' && !net.isHost;
+  return top ? { x: W * 0.5, y: H * 0.2, a: Math.PI / 2 } : { x: W * 0.5, y: H * 0.56, a: -Math.PI / 2 };
+}
+function resetShipForRound() {
+  const p = spawnPoint();
+  Object.assign(ship, { x: p.x, y: p.y, a: p.a, vx: 0, vy: 0, thrust: 0, hp: CFG.HULL, alive: true, invuln: 0, dealt: 0, applied: 0, lastDealt: -999 });
+}
+
+function spawnTier(tier) {
+  const place = size => {
+    let x, y, tries = 0;
+    do { x = Math.random() * W; y = Math.random() * H; tries++; }
+    while (tries < 40 && (wrapDist2({ x, y }, { x: W / 2, y: H * 0.56 }) < 150 * 150 || wrapDist2({ x, y }, { x: W / 2, y: H * 0.2 }) < 150 * 150));
+    world.asteroids.push(makeAsteroid(x, y, size, 1 + (match.rn - 1) * 0.12));
+  };
+  for (let i = 0; i < tier.large; i++) place(3);
+  for (let i = 0; i < tier.medium; i++) place(2);
+}
+
+let nextUfoId = 1;
+function spawnUfo() {
+  const left = Math.random() < 0.5, y = H * rand(0.12, 0.7);
+  world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7), vy: 0,
+                    age: 0, fireT: 70, shots: CFG.UFO_SHOTS, sh: 0, aim: 0 });
+}
+function ufoFire(u, ang) {
+  u.sh++; u.aim = ang;
+  const c = Math.cos(ang), s = Math.sin(ang);
+  spawnBullet(u.x + c * 16, u.y + s * 16, c * CFG.UFO_BULLET_SPEED, s * CFG.UFO_BULLET_SPEED, UFO_COLOR, 'ufo', CFG.UFO_BULLET_LIFE);
+}
+
+/** Host: UFOs cruise across, bob, and take a few aimed-ish shots at pilots. */
+function updateUfosAuthority() {
+  for (let i = world.ufos.length - 1; i >= 0; i--) {
+    const u = world.ufos[i];
+    u.age++; u.x += u.vx;
+    u.y = u.base + Math.sin(u.age * 0.04) * 30; u.vy = Math.cos(u.age * 0.04) * 1.2;
+    if (u.shots > 0 && --u.fireT <= 0 && match.ph === 'play') {
+      const targets = [ship, opp].filter(o => o && o.alive);
+      if (targets.length) {
+        const t = targets[Math.floor(Math.random() * targets.length)];
+        ufoFire(u, Math.atan2(wrapDelta(t.y - u.y, H), wrapDelta(t.x - u.x, W)) + rand(-0.16, 0.16));
+      }
+      u.shots--; u.fireT = 85;
+    }
+    if (u.x < -40 || u.x > W + 40) world.ufos.splice(i, 1);
+  }
+}
+
+function startGame() {
+  net.close();
+  world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
+  Particles.clear(); remotes.clear(); opp = null;
+  Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false });
+  tickCount = 0; hintAlpha = 1; leaveTimer = 0; practiceTotal = 0;
+  joy.active = false; fire.held = false; ship.shots = 0;
+  roomCode = '';
+  if (mode === 'online') {
+    roomCode = sanitizeCode(codeInput.value) || generateRoomCode();
+    codeInput.value = roomCode;
+    net = inClaude() ? new RoomAdapter() : new PeerAdapter(); wireNetHandlers(net);
+    awaitingFirstSnap = true; wasHost = true;
+    resetShipForRound();
+    spawnTier(TIERS[1]);                            // warm-up field while waiting
+    net.connect(roomCode);
+  } else {
+    net = new NullAdapter();
+    if (mode === 'bot') {
+      const others = SHIP_COLORS.filter(c => c[1] !== ship.color);
+      opp = new BotShip(others[Math.floor(Math.random() * others.length)][1]);
+    }
+    startRound(1);
+  }
+  state = 'play';
+}
+
+function startRound(n) {
+  Object.assign(match, { rn: n, ph: 'intro', t: CFG.INTRO_MS, sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0 });
+  world.asteroids.length = world.ufos.length = world.bullets.length = 0;
+  resetShipForRound();
+  if (opp && opp.isBot) opp.reset();
+  spawnTier(tierFor(n));
+}
+
+function endRound(res, why) {
+  match.ph = 'result'; match.t = CFG.RESULT_MS; match.res = res; match.why = why;
+  if (res === 'me') match.wins[0]++;
+  if (res === 'opp') match.wins[1]++;
+  if (mode === 'practice') practiceTotal += match.sc[0];
+}
+
+/** Host / local: advance the round clock and decide rounds. */
+function matchTick() {
+  const dt = CFG.TICK_MS;
+  if (match.ph === 'wait') { if (opp) startRound(1); return; }
+  if (match.ph === 'intro') { match.t -= dt; if (match.t <= 0) { match.ph = 'play'; match.t = CFG.ROUND_MS; flashTimer = 45; } return; }
+  if (match.ph === 'play') {
+    match.t -= dt; match.elapsed += dt;
+    const tier = tierFor(match.rn);
+    while (match.ufoIdx < tier.ufos.length && match.elapsed >= tier.ufos[match.ufoIdx]) { spawnUfo(); match.ufoIdx++; }
+    if (world.asteroids.length === 0) { if (++match.refill > 60) { match.refill = 0; spawnTier(tier); } }   // keep the field stocked
+    const meDead = !ship.alive, oppDead = !!opp && !opp.alive;
+    if (mode === 'practice') {
+      if (meDead) endRound('', 'k'); else if (match.t <= 0) endRound('', 't');
+      return;
+    }
+    if (meDead || oppDead || match.t <= 0) {
+      if (meDead !== oppDead) endRound(oppDead ? 'me' : 'opp', 'k');
+      else if (match.sc[0] !== match.sc[1]) endRound(match.sc[0] > match.sc[1] ? 'me' : 'opp', 'p');
+      else endRound('draw', 'd');
+    }
+    return;
+  }
+  if (match.ph === 'result') {
+    match.t -= dt;
+    if (match.t <= 0) {
+      const done = mode === 'practice' ? match.rn >= 3 : (match.wins[0] >= CFG.WINS_NEEDED || match.wins[1] >= CFG.WINS_NEEDED);
+      if (done) { match.ph = 'final'; showFinal(); } else startRound(match.rn + 1);
+    }
+  }
+}
+
+function credit(owner, pts) {
+  if (match.ph !== 'play') return;
+  if (owner === 'local') match.sc[0] += pts;
+  else if (owner === 'bot' || owner.startsWith('r:')) match.sc[1] += pts;
+}
+
+/** Host: split a rock and credit the shooter. */
+function splitAsteroid(idx, owner) {
+  const a = world.asteroids[idx];
+  world.asteroids.splice(idx, 1);
+  explodeAsteroid(a);
+  credit(owner, AST_SCORE[a.size]);
+  if (a.size > 1) for (let k = 0; k < 2; k++) {
+    const c = makeAsteroid(a.x, a.y, a.size - 1, 1 + (match.rn - 1) * 0.12);
+    c.vx += a.vx * 0.5; c.vy += a.vy * 0.5; world.asteroids.push(c);
+  }
+}
+
+/** My hull takes a hit. `force` = a rival's confirmed hit (online). */
+function takeHit(force = false) {
+  if (!ship.alive) return false;
+  if (!force && (ship.invuln > 0 || match.ph !== 'play')) return false;
+  ship.hp--; ship.invuln = CFG.HIT_INVULN;
+  Particles.burst(ship.x, ship.y, ship.color, 18, 3, 25);
+  world.shake = Math.max(world.shake, 8); buzz(60);
+  if (ship.hp <= 0) { ship.alive = false; explodeShip(ship.x, ship.y, ship.color); buzz(220); }
+  return true;
+}
+
+function bounceOff(o, a) {
+  let ddx = wrapDelta(o.x - a.x, W), ddy = wrapDelta(o.y - a.y, H);
+  const d = Math.hypot(ddx, ddy) || 1; ddx /= d; ddy /= d;
+  o.vx = ddx * 3 + a.vx; o.vy = ddy * 3 + a.vy;
+  o.x = a.x + ddx * (a.r + CFG.SHIP_R + 1); o.y = a.y + ddy * (a.r + CFG.SHIP_R + 1); wrap(o);
+}
+
+function wireNetHandlers(n) {
+  n.on('state', m => {
+    let r = remotes.get(m.id);
+    if (!r) { r = new RemotePlayer(m.id, m.col); remotes.set(m.id, r); }
+    r.goneAt = 0;                                     // heard from them: not gone
+    r.push(m);
+    if (!opp && state === 'play') opp = r;            // first other pilot is the rival
+    // Apply the rival's confirmed hits on me for this round
+    if (opp === r && match.rn > 0 && m.dr === match.rn)
+      while (ship.applied < m.dmg && ship.alive) { ship.applied++; takeHit(true); }
+  });
+  n.on('fire', m => { const r = remotes.get(m.id); if (r && r.alive) spawnBullet(m.x, m.y, m.vx, m.vy, r.color, 'r:' + m.id); });
+  // A rival only counts as gone after 3 s of silence, so a reconnect or restart
+  // (whose "left" can arrive just after its "back") never hands out a false forfeit.
+  n.on('leave', m => {
+    const r = remotes.get(m.id);
+    if (!r) return;
+    if (r === opp) { if (!r.goneAt) r.goneAt = performance.now(); }
+    else remotes.delete(m.id);
+  });
+  n.on('snapshot', applySnapshot);
+  n.on('full', () => {
+    net.close(); state = 'menu'; opp = null;
+    menuEl.classList.remove('hidden'); seedAmbient();
+    roomNote.textContent = `Room ${roomCode} already has two pilots. Tap NEW CODE and try again.`;
+    roomNote.classList.add('warn');
+  });
+}
+
+/** Guests: mirror the host's match state, rocks and UFOs. */
+function applySnapshot(s) {
+  if (state !== 'play' || isAuthority()) return;
+  const m = s.m;
+  if (m && Number.isFinite(+m.rn)) {
+    const rn = +m.rn;
+    if (rn !== match.rn && rn > 0) {                  // new round: reset my hull and spawn
+      match.rn = rn; resetShipForRound(); world.bullets.length = 0; awaitingFirstSnap = true;
+    }
+    const prevPh = match.ph;
+    const w = Array.isArray(m.w) ? m.w : [0, 0], sc = Array.isArray(m.sc) ? m.sc : [0, 0];
+    match.ph = ['wait', 'intro', 'play', 'result', 'final'].includes(m.ph) ? m.ph : match.ph;
+    match.t = +m.t || 0;
+    match.wins = [+w[1] || 0, +w[0] || 0];            // host's view → mine
+    match.sc = [+sc[1] || 0, +sc[0] || 0];
+    match.res = m.res === 'h' ? 'opp' : m.res === 'g' ? 'me' : m.res === 'draw' ? 'draw' : '';
+    match.why = typeof m.why === 'string' ? m.why.slice(0, 2) : '';
+    if (prevPh === 'intro' && match.ph === 'play') flashTimer = 45;
+    if (match.ph === 'final' && prevPh !== 'final') { showFinal(); return; }
+  }
+  // Rocks
+  const byId = new Map(world.asteroids.map(a => [a.id, a])), seen = new Set();
+  for (const e of s.ast) {
+    if (!Array.isArray(e) || e.length < 6) continue;
+    const [id, x, y, vx, vy, size] = e.map(Number);
+    if (!(size >= 1 && size <= 3)) continue;
+    seen.add(id);
+    let a = byId.get(id);
+    if (!a) { a = makeAsteroid(dx_(x), dy_(y), size, 1, id); world.asteroids.push(a); }
+    a.tx = dx_(x); a.ty = dy_(y); a.vx = dvx(vx); a.vy = dvy(vy);
+  }
+  for (let i = world.asteroids.length - 1; i >= 0; i--) {
+    const a = world.asteroids[i];
+    if (seen.has(a.id)) continue;
+    world.asteroids.splice(i, 1);
+    if (!awaitingFirstSnap) explodeAsteroid(a);
+  }
+  // UFOs (+ replay their shots, which can hit me)
+  const ufoById = new Map(world.ufos.map(u => [u.id, u])), seenU = new Set();
+  for (const e of s.ufo) {
+    if (!Array.isArray(e) || e.length < 7) continue;
+    const [id, x, y, vx, vy, sh, aim] = e.map(Number);
+    seenU.add(id);
+    let u = ufoById.get(id);
+    if (!u) { u = { id, x: dx_(x), y: dy_(y), vx: 0, vy: 0, sh }; world.ufos.push(u); }
+    u.tx = dx_(x); u.ty = dy_(y); u.vx = dvx(vx); u.vy = dvy(vy);
+    if (sh > u.sh) { for (let k = 0; k < Math.min(2, sh - u.sh); k++) ufoFire(u, aim / 1000); u.sh = sh; }
+  }
+  for (let i = world.ufos.length - 1; i >= 0; i--) {
+    const u = world.ufos[i];
+    if (seenU.has(u.id)) continue;
+    world.ufos.splice(i, 1);
+    if (!awaitingFirstSnap && u.x > 0 && u.x < W) explodeUfo(u);   // off-screen = flew away
+  }
+  awaitingFirstSnap = false;
+}
+
+function buildPresence() {
+  const p = {
+    v: 1, on: 1, col: ship.color,
+    x: nx(ship.x), y: ny(ship.y), vx: nvx(ship.vx), vy: nvy(ship.vy),
+    a: Math.round(ship.a * 1000), t: Math.round(ship.thrust * 100),
+    al: ship.alive ? 1 : 0, hp: ship.hp, sh: ship.shots, dmg: ship.dealt, dr: match.rn, hs: net.claiming ? 1 : 0,
+  };
+  if (isAuthority()) {
+    p.ast = world.asteroids.slice(0, CFG.MAX_SYNC_ASTEROIDS).map(a => [a.id, nx(a.x), ny(a.y), nvx(a.vx), nvy(a.vy), a.size]);
+    p.ufo = world.ufos.map(u => [u.id, nx(u.x), ny(u.y), nvx(u.vx), nvy(u.vy), u.sh, Math.round(u.aim * 1000)]);
+    p.m = { rn: match.rn, ph: match.ph, t: Math.round(match.t), w: match.wins, sc: match.sc,
+            res: match.res === 'me' ? 'h' : match.res === 'opp' ? 'g' : match.res, why: match.why };
+  }
+  return p;
+}
+
+function showFinal() {
+  state = 'over'; joy.active = false; fire.held = false;
+  if (mode === 'online') leaveTimer = 90;            // keep broadcasting briefly so the rival sees the result
+  const title = document.getElementById('overTitle'), big = document.getElementById('finalScore'), info = document.getElementById('overInfo');
+  const oppName = mode === 'bot' ? 'THE BOT' : 'YOUR RIVAL';
+  if (mode === 'practice') {
+    title.textContent = 'RUN COMPLETE';
+    big.textContent = practiceTotal.toLocaleString();
+    info.textContent = 'Total points across 3 rounds.';
+  } else if (match.forfeit) {
+    title.textContent = 'VICTORY';
+    big.textContent = `${match.wins[0]} – ${match.wins[1]}`;
+    info.textContent = `${oppName} left the room. The win is yours.`;
+  } else {
+    const won = match.wins[0] > match.wins[1];
+    title.textContent = won ? 'VICTORY' : 'DEFEAT';
+    big.textContent = `${match.wins[0]} – ${match.wins[1]}`;
+    info.textContent = won ? `You beat ${oppName.toLowerCase()} in the best of 3.` : `${oppName[0] + oppName.slice(1).toLowerCase()} takes the best of 3.`;
+  }
+  overEl.classList.remove('hidden');
+}
+
+function seedAmbient() {
+  world.asteroids.length = world.ufos.length = world.bullets.length = 0;
+  for (let i = 0; i < 6; i++) world.asteroids.push(makeAsteroid(Math.random() * W, Math.random() * H, 1 + (i % 3), 0.6));
+}
+
+/* =====================================================================
+   11. UPDATE + RENDER (fixed 60 Hz simulation)
+   ===================================================================== */
+/** Resolve one bullet against the world. Returns true if it's used up. */
+function bulletStep(b, auth) {
+  const playerShot = b.owner !== 'ufo';
+  for (let j = world.asteroids.length - 1; j >= 0; j--) {
+    const a = world.asteroids[j];
+    if (wrapDist2(a, b) < a.r * a.r) { spark(b.x, b.y); if (auth && playerShot) splitAsteroid(j, b.owner); return true; }
+  }
+  if (playerShot) for (let j = world.ufos.length - 1; j >= 0; j--) {
+    const u = world.ufos[j];
+    if (wrapDist2(u, b) < 18 * 18) {
+      spark(b.x, b.y);
+      if (auth) { world.ufos.splice(j, 1); explodeUfo(u); credit(b.owner, CFG.UFO_SCORE); }
+      return true;
+    }
+  }
+  const R2 = CFG.SHIP_HIT_R * CFG.SHIP_HIT_R;
+  // My ship: bot and UFO shots are decided here; an online rival's shots are decided by the rival
+  if (ship.alive && b.owner !== 'local' && wrapDist2(ship, b) < R2) {
+    if (b.owner === 'bot' || b.owner === 'ufo') takeHit();
+    spark(b.x, b.y); return true;
+  }
+  if (opp && opp.alive && b.owner !== opp.owner && wrapDist2(opp, b) < R2) {
+    if (opp.isBot) { if (b.owner === 'local' || b.owner === 'ufo') opp.damage(); }
+    else if (b.owner === 'local' && match.ph === 'play' && tickCount - ship.lastDealt >= CFG.HIT_INVULN) {
+      ship.dealt++; ship.lastDealt = tickCount;       // my hit on the rival; they apply it
+    }
+    spark(b.x, b.y); return true;
+  }
+  return false;
+}
+
+function update() {
+  tickCount++; now += CFG.TICK_MS;
+  const playing = state === 'play';
+  const auth = isAuthority();
+
+  if (playing && mode === 'online' && net.isHost !== wasHost) {           // host hand-over
+    wasHost = net.isHost;
+    if (wasHost) { for (const a of world.asteroids) a.tx = a.ty = undefined; for (const u of world.ufos) u.tx = undefined; }
+    else awaitingFirstSnap = true;
+  }
+
+  if (playing && auth) matchTick();
+  else if (playing && match.ph !== 'wait' && match.ph !== 'final') match.t = Math.max(0, match.t - CFG.TICK_MS);
+
+  // ---- My ship ----
+  if (playing && ship.alive) {
+    const live = canFly();
+    if (live && joy.active && joy.mag > CFG.AIM_DEADZONE) {
+      ship.a += angDiff(joy.angle, ship.a) * CFG.TURN_LERP;               // facing ≠ travel direction
+      ship.thrust = clamp((joy.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
+    } else ship.thrust = 0;
+    if (match.ph !== 'intro') {
+      ship.vx += Math.cos(ship.a) * CFG.THRUST * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * ship.thrust;
+      ship.vx *= CFG.DRAG; ship.vy *= CFG.DRAG;                             // permanent drag
+      const sp = Math.hypot(ship.vx, ship.vy);
+      if (sp > CFG.MAX_SPEED) { ship.vx *= CFG.MAX_SPEED / sp; ship.vy *= CFG.MAX_SPEED / sp; }
+      ship.x += ship.vx; ship.y += ship.vy; wrap(ship);
+    }
+    if (ship.invuln > 0) ship.invuln--;
+    emitExhaust(ship.x, ship.y, ship.vx, ship.vy, ship.a, ship.thrust, ship.color);
+    damageFx(ship);
+    if (fire.held) { fire.repeatAcc += CFG.TICK_MS; if (fire.repeatAcc >= CFG.FIRE_REPEAT_MS) tryFire(); }
+  }
+  fire.pulse *= 0.85;
+
+  // ---- Rival ----
+  if (opp && opp.goneAt && performance.now() - opp.goneAt > 3000) {           // rival really left
+    remotes.delete(opp.id); opp = null;
+    if (playing && match.rn > 0 && match.ph !== 'final') { match.forfeit = true; match.ph = 'final'; showFinal(); }
+  }
+  if (playing && opp) opp.update();
+
+  // ---- Network ----
+  if (mode === 'online' && (playing || leaveTimer > 0)) {
+    netAcc += CFG.TICK_MS;
+    if (netAcc >= 1000 / CFG.NET_SEND_HZ) { netAcc = 0; net.publish(buildPresence()); }
+    if (leaveTimer > 0 && --leaveTimer === 0) net.close();
+  }
+
+  // ---- Rocks (guests glide mirrored rocks toward the host's positions) ----
+  for (const a of world.asteroids) {
+    if (a.tx !== undefined) {
+      a.tx += a.vx; a.ty += a.vy;
+      if (a.tx < 0) a.tx += W; else if (a.tx >= W) a.tx -= W;
+      if (a.ty < 0) a.ty += H; else if (a.ty >= H) a.ty -= H;
+      a.x += a.vx + wrapDelta(a.tx - a.x, W) * 0.15; a.y += a.vy + wrapDelta(a.ty - a.y, H) * 0.15;
+    } else { a.x += a.vx; a.y += a.vy; }
+    a.rot += a.spin; wrap(a);
+  }
+
+  // ---- UFOs ----
+  if (auth) updateUfosAuthority();
+  else for (const u of world.ufos) {
+    u.tx += u.vx; u.ty += u.vy;
+    u.x += u.vx + (u.tx - u.x) * 0.15; u.y += u.vy + (u.ty - u.y) * 0.15;
+  }
+
+  // ---- Bullets ----
+  for (let i = world.bullets.length - 1; i >= 0; i--) {
+    const b = world.bullets[i];
+    b.x += b.vx; b.y += b.vy; wrap(b);
+    if (--b.life <= 0 || bulletStep(b, auth)) world.bullets.splice(i, 1);
+  }
+
+  // ---- Ships vs rocks and UFO hulls ----
+  if (playing && ship.alive && match.ph !== 'intro') {
+    for (const a of world.asteroids) {
+      const rr = a.r + CFG.SHIP_R * 0.7;
+      if (wrapDist2(a, ship) < rr * rr) {
+        if (ship.invuln <= 0) takeHit();
+        bounceOff(ship, a); ship.invuln = Math.max(ship.invuln, CFG.ROCK_INVULN);
+        break;
+      }
+    }
+    for (const u of world.ufos) if (wrapDist2(u, ship) < 20 * 20) takeHit();
+  }
+  if (playing && opp && opp.isBot && opp.alive && match.ph !== 'intro') {
+    for (const a of world.asteroids) {
+      const rr = a.r + CFG.SHIP_R * 0.7;
+      if (wrapDist2(a, opp) < rr * rr) { opp.damage(); bounceOff(opp, a); opp.invuln = Math.max(opp.invuln, CFG.ROCK_INVULN); break; }
+    }
+  }
+
+  // ---- Effects ----
+  for (let i = world.rings.length - 1; i >= 0; i--) {
+    const r = world.rings[i];
+    r.r += (r.max - r.r) * 0.12; r.life -= 0.035;
+    if (r.life <= 0) world.rings.splice(i, 1);
+  }
+  Particles.update();
+  world.shake *= 0.86;
+  if (flashTimer > 0) flashTimer--;
+}
+
+function render() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.drawImage(bg, 0, 0, W, H);
+  ctx.save();
+  if (world.shake > 0.3) ctx.translate(Math.round(rand(-1, 1) * world.shake), Math.round(rand(-1, 1) * world.shake));
+  for (const a of world.asteroids) drawAsteroid(a);
+  for (const u of world.ufos) drawUfo(u, tickCount);
+  drawBullets();
+  Particles.draw();
+  for (const r of world.rings) {
+    ctx.globalAlpha = Math.max(0, r.life);
+    ctx.strokeStyle = r.color; ctx.lineWidth = 2; ctx.shadowColor = r.color; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, TAU); ctx.stroke();
+  }
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  if (state === 'play') {
+    if (opp) opp.draw(tickCount);
+    if (ship.alive && !(ship.invuln > 0 && (tickCount >> 3) % 2 === 0))
+      drawWrapped(ship.x, ship.y, 20, (x, y) => drawShip(x, y, ship.a, ship.color, ship.thrust, tickCount, ship.hp));
+  }
+  ctx.restore();
+  if (state === 'play') { drawHUD(); drawBanners(); drawControls(); }
+}
+
+function glowText(txt, x, y, color, size, align = 'left', blur = 10) {
+  ctx.font = `bold ${size}px "Courier New", monospace`;
+  ctx.textAlign = align; ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = blur;
+  ctx.fillText(txt, x, y); ctx.shadowBlur = 0;
+}
+/** Centered text that wraps to fit maxW (for long status messages). */
+function wrapText(txt, x, y, maxW, lineH, color, size) {
+  ctx.font = `bold ${size}px "Courier New", monospace`;
+  const words = txt.split(' '); let line = '', yy = y;
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { glowText(line, x, yy, color, size, 'center', 0); line = w; yy += lineH; }
+    else line = test;
+  }
+  if (line) glowText(line, x, yy, color, size, 'center', 0);
+}
+
+/** Hull pips then round-win diamonds, laid out from x toward `dir`. */
+function drawStatus(x, y, hp, wins, color, dir) {
+  for (let i = 0; i < CFG.HULL; i++) {
+    const px = dir > 0 ? x + i * 14 : x - 10 - i * 14;
+    ctx.globalAlpha = i < hp ? 1 : 0.25; ctx.fillStyle = i < hp ? color : '#5a4aa8';
+    ctx.fillRect(Math.round(px), Math.round(y), 10, 6);
+  }
+  ctx.globalAlpha = 1;
+  if (mode === 'practice') return;
+  for (let i = 0; i < CFG.WINS_NEEDED; i++) {
+    const cx = dir > 0 ? x + 50 + i * 14 : x - 55 - i * 14, cy = y + 3;
+    ctx.beginPath(); ctx.moveTo(cx, cy - 5); ctx.lineTo(cx + 5, cy); ctx.lineTo(cx, cy + 5); ctx.lineTo(cx - 5, cy); ctx.closePath();
+    if (i < wins) { ctx.fillStyle = '#ffe600'; ctx.shadowColor = '#ffe600'; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0; }
+    else { ctx.strokeStyle = '#5a4aa8'; ctx.lineWidth = 1; ctx.stroke(); }
+  }
+}
+
+function drawHUD() {
+  const top = SAFE_TOP + 20;
+  // Me (left)
+  glowText('YOU', 14, top, '#9a8fd6', 10, 'left', 0);
+  glowText(String(match.sc[0]).padStart(4, '0'), 14, top + 20, ship.color, 20);
+  drawStatus(14, top + 28, ship.alive ? ship.hp : 0, match.wins[0], ship.color, 1);
+  // Rival (right)
+  if (opp) {
+    glowText(opp.label, W - 14, top, '#9a8fd6', 10, 'right', 0);
+    glowText(String(match.sc[1]).padStart(4, '0'), W - 14, top + 20, opp.color, 20, 'right');
+    drawStatus(W - 14, top + 28, opp.alive ? opp.hp : 0, match.wins[1], opp.color, -1);
+  }
+  // Round + clock (center)
+  if (match.rn > 0) {
+    glowText(mode === 'practice' ? `ROUND ${match.rn}/3` : `ROUND ${match.rn}`, W / 2, top, '#9a8fd6', 11, 'center', 0);
+    const secs = match.ph === 'play' ? Math.ceil(match.t / 1000) : match.ph === 'intro' ? 30 : 0;
+    glowText(`0:${String(clamp(secs, 0, 30)).padStart(2, '0')}`, W / 2, top + 22, match.ph === 'play' && secs <= 5 ? '#ff2d4b' : '#ffffff', 22, 'center');
+  }
+  if (mode === 'online') {
+    const line = net.status ? (net.status === 'CONNECTING…' ? net.status : 'NOT ONLINE') : (opp ? `ROOM ${roomCode} · ${net.isHost ? 'HOST' : 'GUEST'}` : `ROOM ${roomCode}`);
+    glowText(line, W / 2, top + 42, net.status ? '#ff9f1c' : '#8b80c4', 10, 'center', 0);
+  }
+}
+
+function drawBanners() {
+  const cy = H * 0.3;
+  const oppName = mode === 'bot' ? 'BOT' : 'RIVAL';
+  if (match.ph === 'wait') {
+    const cy = H * 0.17;
+    glowText('WAITING FOR RIVAL', W / 2, cy, '#ffffff', 22, 'center');
+    glowText(`ROOM CODE ${roomCode}`, W / 2, cy + 30, ship.color, 16, 'center');
+    glowText('Warm up: nothing counts yet', W / 2, cy + 54, '#8b80c4', 11, 'center', 0);
+    let yy = cy + 80;
+    if (net.status && net.status !== 'CONNECTING…') { wrapText(net.status, W / 2, yy, W - 40, 16, '#ff2d4b', 12); yy += 40; }
+    if (net.report) wrapText(net.report().toUpperCase(), W / 2, yy, W - 40, 13, '#8b80c4', 10);
+  } else if (match.ph === 'intro') {
+    glowText(`ROUND ${match.rn}`, W / 2, cy, '#ffffff', 34, 'center');
+    glowText(tierFor(match.rn).tag, W / 2, cy + 28, match.rn >= 3 ? UFO_COLOR : '#9a8fd6', 14, 'center');
+    glowText(String(Math.max(1, Math.ceil(match.t / 1000))), W / 2, cy + 86, ship.color, 56, 'center', 20);
+  } else if (match.ph === 'play' && flashTimer > 0) {
+    ctx.globalAlpha = flashTimer / 45;
+    glowText(mode === 'practice' ? 'GO!' : 'FIGHT!', W / 2, cy + 20, '#ffffff', 44, 'center', 24);
+    ctx.globalAlpha = 1;
+  } else if (match.ph === 'result') {
+    let head, col;
+    if (mode === 'practice') { head = `ROUND ${match.rn}: ${match.sc[0]} PTS`; col = ship.color; }
+    else if (match.res === 'me') { head = 'YOU TAKE THE ROUND'; col = ship.color; }
+    else if (match.res === 'opp') { head = `${oppName} TAKES THE ROUND`; col = opp ? opp.color : '#ffffff'; }
+    else { head = 'DRAW · ROUND REPLAYS'; col = '#ffffff'; }
+    let why = '';
+    if (match.why === 'k') why = mode === 'practice' ? 'SHIP DESTROYED' : match.res === 'me' ? `${oppName} DESTROYED` : 'YOU WERE DESTROYED';
+    else if (match.why === 'p') why = `TIME · ${match.sc[0]} – ${match.sc[1]} PTS`;
+    else if (match.why === 'd') why = `TIME · TIED ${match.sc[0]} – ${match.sc[1]}`;
+    else if (match.why === 't') why = 'TIME';
+    glowText(head, W / 2, cy, col, 22, 'center', 16);
+    glowText(why, W / 2, cy + 28, '#ffffff', 13, 'center', 0);
+  }
+}
+
+let last = performance.now(), acc = 0, fpsAvg = 60;
+function frame(t) {
+  requestAnimationFrame(frame);
+  let dt = t - last; last = t;
+  if (dt > 250) dt = 250;
+  if (dt > 0) fpsAvg = fpsAvg * 0.95 + (1000 / dt) * 0.05;
+  Particles.quality = fpsAvg < 40 ? 0.4 : fpsAvg < 52 ? 0.7 : 1;
+  if (!paused) {
+    acc += dt; let steps = 0;
+    while (acc >= CFG.TICK_MS && steps < 5) { update(); acc -= CFG.TICK_MS; steps++; }
+    if (steps === 5) acc = 0;
+  }
+  render();
+}
+document.addEventListener('visibilitychange', () => {
+  paused = document.hidden && mode !== 'online';     // online keeps running so the duel stays in sync
+  if (!document.hidden) { last = performance.now(); acc = 0; }
+  else { joy.active = false; fire.held = false; }
+});
+
+/* =====================================================================
+   12. MENU WIRING
+   ===================================================================== */
+const menuEl = document.getElementById('menu');
+const overEl = document.getElementById('over');
+const startBtn = document.getElementById('startBtn');
+const codeInput = document.getElementById('roomCode');
+const roomBox = document.getElementById('roomBox');
+const roomNote = document.getElementById('roomNote');
+const dotsEl = document.getElementById('dots');
+
+const sanitizeCode = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+codeInput.value = generateRoomCode();
+codeInput.addEventListener('input', () => { codeInput.value = sanitizeCode(codeInput.value); });
+document.getElementById('newCode').addEventListener('click', () => {
+  codeInput.value = generateRoomCode();
+  roomNote.textContent = DEFAULT_NOTE;
+  roomNote.classList.remove('warn');
+});
+
+for (const [key, hex, name] of SHIP_COLORS) {
+  const b = document.createElement('button');
+  b.className = 'dot'; b.dataset.color = key; b.style.setProperty('--c', hex); b.setAttribute('aria-label', name);
+  b.addEventListener('click', () => selectColor(key));
+  dotsEl.appendChild(b);
+}
+function selectColor(key) {
+  const [, hex, name] = SHIP_COLORS.find(c => c[0] === key);
+  ship.color = hex; ship.colorName = name;
+  document.querySelectorAll('.dot').forEach(d => d.classList.toggle('sel', d.dataset.color === key));
+  const label = document.getElementById('dotName');
+  label.textContent = name; label.style.setProperty('--c', hex);
+  startBtn.style.setProperty('--accent', hex);
+  document.getElementById('againBtn').style.setProperty('--accent', hex);
+}
+document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('sel', x === b));
+  roomBox.classList.toggle('hidden', mode !== 'online');
+}));
+const liveNote = document.getElementById('liveNote');
+const shareBtn = document.getElementById('shareBtn');
+const DEFAULT_NOTE = inClaude()
+  ? 'Send your rival this page. They pick ONLINE and type the same code.'
+  : 'Tap SHARE INVITE LINK and send it. Your rival\'s game opens straight into this room.';
+roomNote.textContent = DEFAULT_NOTE;
+
+/* Invite links (?room=CODE) open straight into ONLINE with the code filled in. */
+const inviteUrl = code => `${location.origin}${location.pathname}?room=${code}`;
+(() => {
+  const invited = sanitizeCode(new URLSearchParams(location.search).get('room'));
+  if (invited.length !== 4) return;
+  codeInput.value = invited;
+  document.querySelector('[data-mode="online"]').click();
+  roomNote.textContent = `You're invited to room ${invited}. Pick a hull and tap LAUNCH.`;
+})();
+
+if (!inClaude()) {
+  // Open web: direct links via PeerJS. Show the share button and library status.
+  shareBtn.hidden = false;
+  shareBtn.addEventListener('click', async () => {
+    const code = sanitizeCode(codeInput.value) || generateRoomCode();
+    codeInput.value = code;
+    const url = inviteUrl(code);
+    try {
+      if (navigator.share) { await navigator.share({ title: 'Neon Asteroids duel', text: `Duel me in Neon Asteroids! Room ${code}`, url }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(url); roomNote.textContent = `Invite link copied. Paste it to your rival: ${url}`; }
+    catch (_) { roomNote.textContent = `Send your rival this link: ${url}`; }
+    roomNote.classList.remove('warn');
+  });
+  let tries = 0;
+  const checkLib = () => {
+    if (PeerCtor()) { liveNote.textContent = 'DIRECT LINK: READY'; liveNote.classList.remove('warn'); return; }
+    if (++tries > 20) { liveNote.textContent = 'DIRECT LINK: LIBRARY BLOCKED · CHECK YOUR CONNECTION'; liveNote.classList.add('warn'); return; }
+    liveNote.textContent = 'DIRECT LINK: LOADING…'; setTimeout(checkLib, 500);
+  };
+  checkLib();
+}
+
+/* Inside Claude: live pre-flight check on the menu: how many screens have this page open right now.
+   If both of your devices show 2, they can see each other and will connect. */
+if (inClaude()) roomApiPromise.then(api => {
+  if (!api) {
+    roomNote.textContent = 'This viewer can\'t go online. Tap the open-in-browser button, or open the link in Chrome or Safari while signed in to claude.ai.'; roomNote.classList.add('warn');
+    liveNote.textContent = 'LIVE LINK: NOT AVAILABLE IN THIS VIEWER'; liveNote.classList.add('warn');
+    return;
+  }
+  const show = () => {
+    const n = api.peers().length, on = api.connected();
+    liveNote.textContent = !on ? 'LIVE LINK: CONNECTING…' : `LIVE LINK: ON · ${n} SCREEN${n === 1 ? '' : 'S'} HAVE THIS PAGE OPEN`;
+    liveNote.classList.toggle('warn', !on);
+  };
+  const fail = e => { liveNote.textContent = `LIVE LINK: UNAVAILABLE (${(e && e.code) || 'error'})`; liveNote.classList.add('warn'); };
+  api.onPeers(show, fail);
+  api.onConnection(show, fail);
+});
+
+startBtn.addEventListener('click', () => { menuEl.classList.add('hidden'); startGame(); });
+document.getElementById('againBtn').addEventListener('click', () => { overEl.classList.add('hidden'); startGame(); });
+document.getElementById('menuBtn').addEventListener('click', () => {
+  net.close(); leaveTimer = 0;
+  overEl.classList.add('hidden'); menuEl.classList.remove('hidden');
+  state = 'menu'; opp = null; seedAmbient();
+});
+
+// Tell the rival we're gone as soon as the page closes
+window.addEventListener('pagehide', () => { try { net.close(); } catch (_) {} });
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 150));
+resize();
+Particles.init();
+selectColor('pink');
+seedAmbient();
+requestAnimationFrame(frame);
+</script>
+
+</body>
+</html>
