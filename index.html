@@ -147,6 +147,25 @@
     box-shadow: 0 0 16px #ffe600; cursor: pointer;
   }
   #updateBtn.hidden { display: none; }
+  .small-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+  /* Network test */
+  #netTest { z-index: 30; justify-content: flex-start; background: rgba(5,1,15,.95); gap: 14px; }
+  .nt-title { font-size: clamp(26px, 8vw, 40px); }
+  .nt-rows { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+  .nt-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: rgba(20,6,50,.5); }
+  .nt-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .nt-label { font-weight: bold; font-size: 13px; letter-spacing: 2px; color: #fff; }
+  .nt-detail { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.4; overflow-wrap: anywhere; }
+  .nt-pill { font-weight: bold; font-size: 11px; letter-spacing: 2px; padding: 3px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .nt-pill.run { color: #9a8fd6; }
+  .nt-pill.ok { color: #05010f; background: #39ff14; border-color: #39ff14; }
+  .nt-pill.warn { color: #05010f; background: #ffe600; border-color: #ffe600; }
+  .nt-pill.fail { color: #fff; background: #ff2d4b; border-color: #ff2d4b; }
+  .nt-verdict { width: 100%; max-width: 380px; box-sizing: border-box; font-size: 13px; line-height: 1.5; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line); color: #fff; }
+  .nt-verdict.good { border-color: #39ff14; box-shadow: 0 0 12px rgba(57,255,20,.4); }
+  .nt-verdict.ok { border-color: #ffe600; box-shadow: 0 0 12px rgba(255,230,0,.35); }
+  .nt-verdict.bad { border-color: #ff2d4b; box-shadow: 0 0 12px rgba(255,45,75,.4); }
   #buildTag { font-size: 10px; opacity: .6; }
 
   #rotate { display: none; }
@@ -211,7 +230,10 @@
   </div>
 
   <button class="btn go hidden" id="startBtn">HOST GAME</button>
-  <button class="btn small" id="soundBtn">SOUND: ON</button>
+  <div class="small-row">
+    <button class="btn small" id="soundBtn">SOUND: ON</button>
+    <button class="btn small" id="ntBtn">NETWORK TEST</button>
+  </div>
   <div class="note" id="buildTag"></div>
 </div>
 
@@ -226,6 +248,7 @@
   <button class="btn go" id="resumeBtn">KEEP PLAYING</button>
   <button class="btn" id="surrenderBtn">SURRENDER</button>
   <button class="btn" id="quitBtn">QUIT TO MENU</button>
+  <button class="btn small" id="ntBtn2">NETWORK TEST</button>
   <button class="btn small" id="soundBtn2">SOUND: ON</button>
 </div>
 
@@ -236,6 +259,18 @@
   <div class="hint" id="overInfo"></div>
   <button class="btn go" id="againBtn">REMATCH</button>
   <button class="btn" id="menuBtn">MENU</button>
+</div>
+
+<!-- ================= NETWORK TEST ================= -->
+<div id="netTest" class="overlay hidden">
+  <h1 class="nt-title">NETWORK<br>TEST</h1>
+  <div id="ntRows" class="nt-rows"></div>
+  <div id="ntVerdict" class="nt-verdict"></div>
+  <div class="small-row">
+    <button class="btn small" id="ntRun">RUN AGAIN</button>
+    <button class="btn small" id="ntCopy">COPY REPORT</button>
+  </div>
+  <button class="btn" id="ntClose">CLOSE</button>
 </div>
 
 <div id="rotate" class="overlay">ROTATE TO PORTRAIT ⟲</div>
@@ -259,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-174613';
+const BUILD = '20260928-194356';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2520,6 +2555,185 @@ updateBtn.addEventListener('click', () => {
 checkForUpdate();
 setInterval(() => { if (state !== 'play') checkForUpdate(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+
+/* ---------------------------------------------------------------------
+   NETWORK TEST — a step-by-step check of everything online play needs,
+   with a plain-English verdict and a report testers can copy and send.
+     1 Browser     WebRTC + secure page (what direct links need)
+     2 Online code the matchmaking library loaded in this browser
+     3 Internet    this page's server answers
+     4 Relays      public matchmaking relays accept a connection
+     5 Direct      this network allows direct phone-to-phone links (STUN)
+     6 Backup      the TURN backup relay works (needed on strict networks)
+     7 Network     strict-network check (symmetric NAT → needs the backup)
+   --------------------------------------------------------------------- */
+const NT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.snort.social', 'wss://nostr.mom'];
+const ntEl = document.getElementById('netTest');
+const ntRows = document.getElementById('ntRows');
+const ntVerdict = document.getElementById('ntVerdict');
+let ntRunning = false, ntReport = '';
+const NT_STEPS = [
+  ['browser', 'Browser'], ['code', 'Online code'], ['internet', 'Internet'],
+  ['relays', 'Matchmaking relays'], ['direct', 'Direct links'], ['turn', 'Backup relay'], ['nat', 'Network type'],
+];
+const ntState = {};
+
+function ntSet(key, status, detail) {
+  ntState[key] = { status, detail };
+  const row = document.getElementById('nt-' + key);
+  if (!row) return;
+  row.querySelector('.nt-pill').textContent = status === 'run' ? 'TESTING…' : status === 'ok' ? 'OK' : status === 'warn' ? 'CHECK' : status === 'fail' ? 'FAIL' : '—';
+  row.querySelector('.nt-pill').className = 'nt-pill ' + status;
+  row.querySelector('.nt-detail').textContent = detail || '';
+}
+function ntBuildRows() {
+  ntRows.innerHTML = '';
+  for (const [key, label] of NT_STEPS) {
+    const r = document.createElement('div');
+    r.className = 'nt-row'; r.id = 'nt-' + key;
+    r.innerHTML = '<div class="nt-top"><span class="nt-label"></span><span class="nt-pill wait">—</span></div><div class="nt-detail"></div>';
+    r.querySelector('.nt-label').textContent = label;
+    ntRows.appendChild(r);
+  }
+}
+function deviceSummary() {
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad|iPod/.test(ua) ? 'iOS ' + ((ua.match(/OS (\d+)[_.](\d+)/) || []).slice(1).join('.') || '?')
+    : /Android/.test(ua) ? 'Android ' + ((ua.match(/Android ([\d.]+)/) || [])[1] || '?')
+    : /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'Unknown OS';
+  const inApp = /FBAN|FBAV|Instagram|Line\/|WhatsApp|Snapchat|TikTok|MicroMessenger/.test(ua) ? ' (in-app browser)' : '';
+  const br = /CriOS|Chrome\//.test(ua) && !/Edg/.test(ua) ? 'Chrome' : /Edg/.test(ua) ? 'Edge' : /FxiOS|Firefox/.test(ua) ? 'Firefox'
+    : /Safari/.test(ua) ? 'Safari' : 'Browser';
+  return `${os} · ${br}${inApp}`;
+}
+/** Try a WebSocket; resolve true on open within ms. */
+function wsProbe(url, ms = 5000) {
+  return new Promise(res => {
+    let ws, done = false;
+    const end = ok => { if (done) return; done = true; try { ws && ws.close(); } catch (_) {} res(ok); };
+    try { ws = new WebSocket(url); } catch (_) { end(false); return; }
+    ws.onopen = () => end(true); ws.onerror = () => end(false);
+    setTimeout(() => end(false), ms);
+  });
+}
+/** Gather ICE candidates; returns { types:Set, srflx:[{base,port}] } or null. */
+async function iceGather(servers, policy, ms = 6000) {
+  let pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers: servers, iceTransportPolicy: policy });
+    pc.createDataChannel('probe');
+    const types = new Set(), srflx = [];
+    pc.onicecandidate = e => {
+      const c = e.candidate && e.candidate.candidate; if (!c) return;
+      const t = / typ (\w+)/.exec(c); if (t) types.add(t[1]);
+      if (t && t[1] === 'srflx') { const p = c.split(' '); srflx.push({ port: p[5], raddr: p[9] + ':' + p[11] }); }
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(res => { const tm = setTimeout(res, ms); pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(tm); res(); } }; });
+    return { types, srflx };
+  } catch (_) { return null; }
+  finally { try { pc && pc.close(); } catch (_) {} }
+}
+
+async function runNetworkTest() {
+  if (ntRunning) return;
+  ntRunning = true; ntBuildRows(); ntVerdict.className = 'nt-verdict'; ntVerdict.textContent = 'Running the test… this takes about 10 seconds.';
+  for (const [k] of NT_STEPS) ntSet(k, 'run');
+
+  // 1 Browser
+  const hasRTC = typeof RTCPeerConnection !== 'undefined', secure = window.isSecureContext;
+  ntSet('browser', hasRTC && secure ? 'ok' : 'fail', `${deviceSummary()}${hasRTC ? '' : ' · no WebRTC'}${secure ? '' : ' · page not secure (needs https)'}`);
+
+  if (inClaude()) {
+    // Inside Claude the game uses Claude's live channel instead of WebRTC
+    const api = await roomApiPromise;
+    ntSet('code', api ? 'ok' : 'fail', api ? 'Claude live channel available' : 'Not available in this viewer');
+    for (const k of ['internet', 'relays', 'direct', 'turn', 'nat']) ntSet(k, 'skip', 'Not used inside Claude');
+    return ntFinish();
+  }
+
+  // 2 Online code
+  for (let i = 0; i < 40 && !trysteroLib() && !window.TrysteroFailed; i++) await new Promise(r => setTimeout(r, 200));
+  ntSet('code', trysteroLib() ? 'ok' : 'fail', trysteroLib() ? 'Matchmaking library loaded' : 'Could not load the matchmaking library in this browser');
+
+  // 3–6 in parallel
+  const internet = (async () => {
+    const t0 = performance.now();
+    try { const r = await fetch(location.pathname + '?nettest=' + Date.now(), { cache: 'no-store' }); const ms = Math.round(performance.now() - t0);
+      ntSet('internet', r.ok ? (ms > 1500 ? 'warn' : 'ok') : 'fail', r.ok ? `Page server answered in ${ms} ms${ms > 1500 ? ' (slow connection)' : ''}` : `Server answered ${r.status}`);
+    } catch (_) { ntSet('internet', 'fail', 'No internet connection'); }
+  })();
+  const relays = (async () => {
+    const res = await Promise.all(NT_RELAYS.map(u => wsProbe(u)));
+    const n = res.filter(Boolean).length;
+    ntSet('relays', n >= 2 ? 'ok' : n === 1 ? 'warn' : 'fail', `${n} of ${NT_RELAYS.length} public relays reachable${n ? '' : ' (network may block them)'}`);
+  })();
+  const ice = hasRTC ? await iceServers() : [];
+  const stun = ice.filter(x => !String(x.urls).includes('turn:')), turn = ice.filter(x => String(x.urls).includes('turn:'));
+  const direct = (async () => {
+    if (!hasRTC) { ntSet('direct', 'fail', 'Browser has no WebRTC'); ntSet('nat', 'skip', ''); return; }
+    const g = await iceGather(stun, 'all');
+    if (!g) { ntSet('direct', 'fail', 'Could not start a connection test'); ntSet('nat', 'skip', ''); return; }
+    const ok = g.types.has('srflx');
+    ntSet('direct', ok ? 'ok' : 'warn', ok ? 'Found a public address (direct links possible)' : 'No public address found (direct links likely blocked)');
+    // Symmetric NAT: the same local socket shows up with different public ports for different STUN servers
+    const ports = new Set(g.srflx.map(c => c.port)), bases = new Set(g.srflx.map(c => c.raddr));
+    if (!g.srflx.length) ntSet('nat', 'warn', 'Unknown (no public address seen)');
+    else if (ports.size > bases.size) ntSet('nat', 'warn', 'Strict network (symmetric NAT) — needs the backup relay');
+    else ntSet('nat', 'ok', 'Normal network');
+  })();
+  const turnT = (async () => {
+    if (!hasRTC) { ntSet('turn', 'fail', 'Browser has no WebRTC'); return; }
+    if (!turn.length) { ntSet('turn', 'warn', 'No backup relay configured'); return; }
+    const g = await iceGather(turn, 'relay', 8000);
+    ntSet('turn', g && g.types.has('relay') ? 'ok' : 'fail', g && g.types.has('relay') ? 'Backup relay reachable' : 'Backup relay unreachable (blocked or busy)');
+  })();
+  await Promise.all([internet, relays, direct, turnT]);
+  ntFinish();
+}
+
+function ntFinish() {
+  const st = k => (ntState[k] || {}).status;
+  let verdict, cls;
+  if (st('browser') === 'fail' || st('code') === 'fail') {
+    verdict = 'This browser can\'t play online. Open the link in Safari (iPhone) or Chrome (Android/computer) — not inside another app — and update the phone if it\'s old.'; cls = 'bad';
+  } else if (inClaude()) {
+    verdict = 'Inside Claude, online play uses Claude\'s live channel. For Quick Play and the most reliable connections, use the game\'s web address.'; cls = st('code') === 'ok' ? 'good' : 'bad';
+  } else if (st('internet') === 'fail') {
+    verdict = 'No internet connection. Check Wi-Fi or cellular data and run the test again.'; cls = 'bad';
+  } else if (st('relays') === 'fail') {
+    verdict = 'This network blocks the matchmaking relays, so phones can\'t find each other. Switch between Wi-Fi and cellular, or turn off any VPN, ad blocker, Screen Time or school/work filter.'; cls = 'bad';
+  } else if (st('direct') === 'ok' && st('nat') === 'ok') {
+    verdict = 'GOOD TO CONNECT. Everything online play needs is working on this network.'; cls = 'good';
+  } else if (st('turn') === 'ok') {
+    verdict = 'SHOULD CONNECT. This network limits direct links, so games will use the backup relay (it may take a little longer to join).'; cls = 'ok';
+  } else {
+    verdict = 'MAY NOT CONNECT. This network blocks direct links and the backup relay. Try the other network (Wi-Fi ↔ cellular), or turn off iCloud Private Relay / VPN, then run the test again.'; cls = 'bad';
+  }
+  ntVerdict.textContent = verdict; ntVerdict.className = 'nt-verdict ' + cls;
+  ntReport = [`Neon Asteroids network test · build ${BUILD} · ${new Date().toLocaleString()}`,
+    ...NT_STEPS.map(([k, label]) => `${label}: ${(ntState[k] || {}).status || '-'} — ${(ntState[k] || {}).detail || ''}`),
+    `Verdict: ${verdict}`].join('\n');
+  ntRunning = false;
+}
+function openNetworkTest() {
+  Sound.unlock(); Sound.play('click');
+  ntEl.classList.remove('hidden');
+  document.getElementById('ntCopy').textContent = 'COPY REPORT';
+  runNetworkTest();
+}
+document.getElementById('ntBtn').addEventListener('click', openNetworkTest);
+document.getElementById('ntBtn2').addEventListener('click', openNetworkTest);
+document.getElementById('ntRun').addEventListener('click', () => { Sound.play('click'); runNetworkTest(); });
+document.getElementById('ntClose').addEventListener('click', () => { Sound.play('click'); ntEl.classList.add('hidden'); });
+document.getElementById('ntCopy').addEventListener('click', async () => {
+  const b = document.getElementById('ntCopy');
+  try { await navigator.clipboard.writeText(ntReport); b.textContent = 'COPIED'; }
+  catch (_) {
+    try { if (navigator.share) { await navigator.share({ title: 'Network test', text: ntReport }); return; } } catch (_) {}
+    b.textContent = 'COPY NOT ALLOWED';
+  }
+});
 
 /* ---------- Sound toggle ---------- */
 for (const id of ['soundBtn', 'soundBtn2']) document.getElementById(id).addEventListener('click', () => setSound(!Sound.on));
