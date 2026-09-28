@@ -3,7 +3,7 @@
 A neon, vector-style Asteroids duel for phones (portrait). One thumb steers, the other fires.
 Best of 3 rounds, 1 minute each; 3 hits and your ship is scrap. Round 3 brings UFOs.
 
-**Play:** open the GitHub Pages URL for this repo on your phone.
+**Play:** https://dead-baron.github.io/neon-asteroids/
 
 ## Menu
 - **LAUNCH**: one tap into an online Quick Play match with the next pilot searching.
