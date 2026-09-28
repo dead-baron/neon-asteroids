@@ -259,7 +259,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-173402';
+const BUILD = '20260928-174613';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -343,18 +343,28 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
 const bg = document.createElement('canvas');
 let W = 0, H = 0, DPR = 1, SAFE_TOP = 0, SAFE_BOTTOM = 0;
-/** Speed scale. Physics runs in screen pixels, so a big window would feel slow; every
- *  speed (ship, bullets, rocks, UFOs, bot) is multiplied by WS so crossing the screen
- *  takes the same time on a phone, a tablet or a wide monitor. 1.0 = phone-sized screen. */
-let WS = 1;
-const REF_AREA = 412 * 860;
+/* PLAYFIELD UNITS. Everything moves in a shared field that is REF_W x REF_H units on
+   every device (a phone-shaped reference). SX/SY map field units to this screen's pixels
+   along each axis. Speeds, headings and network data all live in field units, so every
+   device plays the same game: a ship at full speed crosses the field's width (or height)
+   in exactly the same time on a phone, a tablet or a full-screen monitor. Shapes are
+   still drawn in plain pixels, so nothing looks stretched. */
+const REF_W = 412, REF_H = 860;
+let SX = 1, SY = 1;
+/** Heading in field units → direction on this screen (for drawing and spawn offsets). */
+const toScreenAngle = a => Math.atan2(Math.sin(a) * SY, Math.cos(a) * SX);
+/** Direction on this screen (stick, mouse) → heading in field units. */
+const toFieldAngle = sa => Math.atan2(Math.sin(sa) / SY, Math.cos(sa) / SX);
+/** Pixel offset on this screen → heading in field units. */
+const fieldAngleTo = (dx, dy) => Math.atan2(dy / SY, dx / SX);
 
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  // Crisp but affordable: cap the canvas at ~3.5 million pixels so full-screen desktops keep 60 fps
+  DPR = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(3.5e6 / Math.max(1, window.innerWidth * window.innerHeight)));
   // Full window on every device. Online positions travel as fractions of the screen,
   // so a phone and a wide monitor still share one playfield.
   W = window.innerWidth; H = window.innerHeight;
-  WS = clamp(Math.sqrt((W * H) / REF_AREA), 0.75, 3.5);
+  SX = W / REF_W; SY = H / REF_H;
   canvas.classList.toggle('desk', DESKTOP);
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -500,8 +510,9 @@ function damageFx(o) {
   if (Math.random() < (o.hp === 2 ? 0.07 : 0.16) * q)
     Particles.emit(o.x + rand(-6, 6), o.y + rand(-6, 6), rand(-1.6, 1.6), rand(-1.6, 1.6), 12, Math.random() < 0.5 ? '#ffe600' : '#ffffff', 2, 0.9);
   if (o.hp === 1 && Math.random() < 0.4 * q)
-    Particles.emit(o.x - Math.cos(o.a) * 6 + rand(-3, 3), o.y - Math.sin(o.a) * 6 + rand(-3, 3),
-      o.vx * 0.3 + rand(-0.3, 0.3), o.vy * 0.3 + rand(-0.3, 0.3), 34, '#5b5470', 3, 0.97);
+    { const sa = toScreenAngle(o.a);
+      Particles.emit(o.x - Math.cos(sa) * 6 + rand(-3, 3), o.y - Math.sin(sa) * 6 + rand(-3, 3),
+        o.vx * SX * 0.3 + rand(-0.3, 0.3), o.vy * SY * 0.3 + rand(-0.3, 0.3), 34, '#5b5470', 3, 0.97); }
 }
 function explodeShip(x, y, color) {
   Sound.play('boom');
@@ -540,7 +551,7 @@ function makeAsteroid(x, y, size, speedMul = 1, id = nextAstId++ % 1e6) {
   const r = mulberry32(id * 2654435761);                 // same outline on every client
   const n = 7 + Math.floor(r() * 5), pts = [];
   for (let i = 0; i < n; i++) pts.push({ a: (i / n) * TAU + (r() - 0.5) * 0.3, d: 0.7 + r() * 0.35 });
-  const dir = Math.random() * TAU, sp = rand(0.5, 1.2) * (1 + (3 - size) * 0.4) * speedMul * WS;
+  const dir = Math.random() * TAU, sp = rand(0.5, 1.2) * (1 + (3 - size) * 0.4) * speedMul;
   return { id, x, y, vx: Math.cos(dir) * sp, vy: Math.sin(dir) * sp, r: AST_RADIUS[size], size,
            rot: r() * TAU, spin: (r() - 0.5) * 0.05, pts, color: AST_COLORS[size], tx: undefined, ty: undefined };
 }
@@ -567,17 +578,17 @@ function spawnBullet(x, y, vx, vy, color, owner, life = CFG.BULLET_LIFE) {
   world.bullets.push({ x, y, vx, vy, life, color, owner });
 }
 function shootFrom(o, color, owner) {
-  const c = Math.cos(o.a), s = Math.sin(o.a);
-  spawnBullet(o.x + c * 16, o.y + s * 16, c * CFG.BULLET_SPEED * WS + o.vx * CFG.BULLET_INHERIT,
-    s * CFG.BULLET_SPEED * WS + o.vy * CFG.BULLET_INHERIT, color, owner);
+  const c = Math.cos(o.a), s = Math.sin(o.a), sa = toScreenAngle(o.a);
+  spawnBullet(o.x + Math.cos(sa) * 16, o.y + Math.sin(sa) * 16, c * CFG.BULLET_SPEED + o.vx * CFG.BULLET_INHERIT,
+    s * CFG.BULLET_SPEED + o.vy * CFG.BULLET_INHERIT, color, owner);
 }
 function fireLocal() { shootFrom(ship, ship.color, 'local'); ship.shots++; Sound.play('shoot'); }
 
 function drawBullets() {
   ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'square';
   for (const b of world.bullets) {
-    const sp = Math.hypot(b.vx, b.vy) || 1, len = b.owner === 'ufo' ? 4 : 7;
-    const tx = b.x - (b.vx / sp) * len, ty = b.y - (b.vy / sp) * len;
+    const px = b.vx * SX, py = b.vy * SY, sp = Math.hypot(px, py) || 1, len = b.owner === 'ufo' ? 4 : 7;
+    const tx = b.x - (px / sp) * len, ty = b.y - (py / sp) * len;
     ctx.strokeStyle = b.color; ctx.globalAlpha = 0.45; ctx.lineWidth = b.owner === 'ufo' ? 8 : 6;
     ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(tx, ty); ctx.stroke();
     ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = 1; ctx.lineWidth = 2;
@@ -694,7 +705,7 @@ function desktopSteer() {
   if (turn) { ship.a += turn * CFG.KEY_TURN; keys.lastTurn = performance.now(); }
   else if (mouse.inside && mouse.lastMove > keys.lastTurn) {
     const dx = mouse.x - ship.x, dy = mouse.y - ship.y;
-    if (dx * dx + dy * dy > 14 * 14) ship.a += angDiff(Math.atan2(dy, dx), ship.a) * CFG.TURN_LERP;
+    if (dx * dx + dy * dy > 14 * 14) ship.a += angDiff(fieldAngleTo(dx, dy), ship.a) * CFG.TURN_LERP;
   }
   if (keys.up || mouse.thrust) ship.thrust = 1;
   if (keys.down) { ship.vx *= 0.95; ship.vy *= 0.95; }
@@ -928,10 +939,10 @@ class NetAdapter {
     this.emit('state', m);
     const sh = +s.sh || 0, prev = this.lastShots.get(peerId);
     if (prev !== undefined && sh > prev && m.alive) {
-      const c = Math.cos(m.a), sn = Math.sin(m.a);
+      const c = Math.cos(m.a), sn = Math.sin(m.a), sa = toScreenAngle(m.a);
       for (let i = 0; i < Math.min(3, sh - prev); i++) this.emit('fire', {
-        id: peerId, x: m.x + c * 16, y: m.y + sn * 16,
-        vx: c * CFG.BULLET_SPEED * WS + m.vx * CFG.BULLET_INHERIT, vy: sn * CFG.BULLET_SPEED * WS + m.vy * CFG.BULLET_INHERIT,
+        id: peerId, x: m.x + Math.cos(sa) * 16, y: m.y + Math.sin(sa) * 16,
+        vx: c * CFG.BULLET_SPEED + m.vx * CFG.BULLET_INHERIT, vy: sn * CFG.BULLET_SPEED + m.vy * CFG.BULLET_INHERIT,
       });
     }
     this.lastShots.set(peerId, sh);
@@ -945,9 +956,9 @@ class NetAdapter {
 class NullAdapter extends NetAdapter {}
 
 const nx = x => Math.round(x / W * 1e4), ny = y => Math.round(y / H * 1e4);
-const nvx = v => Math.round(v / W * 1e5), nvy = v => Math.round(v / H * 1e5);
+const nvx = v => Math.round(v / REF_W * 1e5), nvy = v => Math.round(v / REF_H * 1e5);   // field units → wire
 const dx_ = x => x / 1e4 * W, dy_ = y => y / 1e4 * H;
-const dvx = v => v / 1e5 * W, dvy = v => v / 1e5 * H;
+const dvx = v => v / 1e5 * REF_W, dvy = v => v / 1e5 * REF_H;                             // wire → field units
 
 /** The page's live room channel; null when not opened inside Claude. */
 const roomApiPromise = (window.claude && typeof window.claude.use === 'function')
@@ -1578,19 +1589,19 @@ class RemotePlayer {
       }
     }
     const last = this.snaps[n - 1], ticks = clamp(rt - last.t, 0, 250) / CFG.TICK_MS;
-    this.x = last.x + last.vx * ticks; this.y = last.y + last.vy * ticks;
+    this.x = last.x + last.vx * SX * ticks; this.y = last.y + last.vy * SY * ticks;
     this.a = last.a; this.vx = last.vx; this.vy = last.vy; this.thr = last.thr; wrap(this);
   }
   update() {
     if (!this.visible || !this.alive) return;
     this.sample(performance.now());
-    emitExhaust(this.x, this.y, this.vx, this.vy, this.a, this.thr, this.color);
+    emitExhaust(this.x, this.y, this.vx * SX, this.vy * SY, toScreenAngle(this.a), this.thr, this.color);
     damageFx(this);
   }
   draw(tick) {
     if (!this.visible || !this.alive || this.goneAt) return;
     this.sample(performance.now());
-    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, this.a, this.color, this.thr, tick, this.hp));
+    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, toScreenAngle(this.a), this.color, this.thr, tick, this.hp));
     if (match.ph === 'play' && rivalShielded()) drawShield(this.x, this.y, this.color, CFG.SPAWN_SHIELD - (tickCount - playStartTick));
   }
 }
@@ -1616,7 +1627,7 @@ class BotShip {
     const live = match.ph === 'play';
     if (--this.retarget <= 0) { this.retarget = rand(80, 150); this.hunt = ship.alive && Math.random() < 0.55; }
     let tx, ty;
-    if (this.hunt && ship.alive) { tx = ship.x + ship.vx * 12; ty = ship.y + ship.vy * 12; }
+    if (this.hunt && ship.alive) { tx = ship.x + ship.vx * SX * 12; ty = ship.y + ship.vy * SY * 12; }
     else {
       let bd = Infinity;
       for (const t of [...world.asteroids, ...world.ufos]) { const d = wrapDist2(t, this); if (d < bd) { bd = d; tx = t.x; ty = t.y; } }
@@ -1624,29 +1635,29 @@ class BotShip {
     let avoid = null;
     for (const a of world.asteroids) if (Math.sqrt(wrapDist2(a, this)) - a.r < 42) { avoid = a; break; }
     let want;
-    if (avoid) { want = Math.atan2(wrapDelta(this.y - avoid.y, H), wrapDelta(this.x - avoid.x, W)); this.thr = 0.9; }
+    if (avoid) { want = fieldAngleTo(wrapDelta(this.x - avoid.x, W), wrapDelta(this.y - avoid.y, H)); this.thr = 0.9; }
     else if (tx !== undefined) {
       const ddx = wrapDelta(tx - this.x, W), ddy = wrapDelta(ty - this.y, H), dist = Math.hypot(ddx, ddy);
-      want = Math.atan2(ddy, ddx); this.thr = dist > 240 ? 0.6 : dist < 110 ? 0 : 0.12;
+      want = fieldAngleTo(ddx, ddy); this.thr = dist > 240 ? 0.6 : dist < 110 ? 0 : 0.12;
     } else this.thr = 0;
     if (!live) this.thr = 0;
     if (want !== undefined) this.a += angDiff(want + (avoid ? 0 : this.aimErr), this.a) * 0.1;
-    this.vx += Math.cos(this.a) * CFG.THRUST * WS * this.thr; this.vy += Math.sin(this.a) * CFG.THRUST * WS * this.thr;
+    this.vx += Math.cos(this.a) * CFG.THRUST * this.thr; this.vy += Math.sin(this.a) * CFG.THRUST * this.thr;
     this.vx *= CFG.DRAG; this.vy *= CFG.DRAG;
     const sp = Math.hypot(this.vx, this.vy);
-    if (sp > CFG.MAX_SPEED * WS) { this.vx *= CFG.MAX_SPEED * WS / sp; this.vy *= CFG.MAX_SPEED * WS / sp; }
-    this.x += this.vx; this.y += this.vy; wrap(this);
+    if (sp > CFG.MAX_SPEED) { this.vx *= CFG.MAX_SPEED / sp; this.vy *= CFG.MAX_SPEED / sp; }
+    this.x += this.vx * SX; this.y += this.vy * SY; wrap(this);
     this.cd -= CFG.TICK_MS;
     if (live && !avoid && want !== undefined && Math.abs(angDiff(want, this.a)) < 0.22 && this.cd <= 0) {
       shootFrom(this, this.color, 'bot'); Sound.play('rival');
       this.cd = rand(320, 560); this.aimErr = rand(-0.13, 0.13);
     }
-    emitExhaust(this.x, this.y, this.vx, this.vy, this.a, this.thr, this.color);
+    emitExhaust(this.x, this.y, this.vx * SX, this.vy * SY, toScreenAngle(this.a), this.thr, this.color);
     damageFx(this);
   }
   draw(tick) {
     if (!this.alive || (this.invuln > 0 && !this.shield && (tick >> 3) % 2 === 0)) return;
-    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, this.a, this.color, this.thr, tick, this.hp));
+    drawWrapped(this.x, this.y, 20, (x, y) => drawShip(x, y, toScreenAngle(this.a), this.color, this.thr, tick, this.hp));
     if (this.shield > 0) drawShield(this.x, this.y, this.color, this.shield);
   }
 }
@@ -1705,26 +1716,26 @@ let nextUfoId = 1;
 function spawnUfo() {
   const left = Math.random() < 0.5, y = H * rand(0.12, 0.7);
   Sound.play('ufo');
-  world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7) * WS, vy: 0,
+  world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7), vy: 0,
                     age: 0, fireT: 70, shots: CFG.UFO_SHOTS, sh: 0, aim: 0 });
 }
 function ufoFire(u, ang) {
   u.sh++; u.aim = ang; Sound.play('ufoShot');
-  const c = Math.cos(ang), s = Math.sin(ang);
-  spawnBullet(u.x + c * 16, u.y + s * 16, c * CFG.UFO_BULLET_SPEED * WS, s * CFG.UFO_BULLET_SPEED * WS, UFO_COLOR, 'ufo', CFG.UFO_BULLET_LIFE);
+  const c = Math.cos(ang), s = Math.sin(ang), sa = toScreenAngle(ang);
+  spawnBullet(u.x + Math.cos(sa) * 16, u.y + Math.sin(sa) * 16, c * CFG.UFO_BULLET_SPEED, s * CFG.UFO_BULLET_SPEED, UFO_COLOR, 'ufo', CFG.UFO_BULLET_LIFE);
 }
 
 /** Host: UFOs cruise across, bob, and take a few aimed-ish shots at pilots. */
 function updateUfosAuthority() {
   for (let i = world.ufos.length - 1; i >= 0; i--) {
     const u = world.ufos[i];
-    u.age++; u.x += u.vx;
-    u.y = u.base + Math.sin(u.age * 0.04) * 30 * WS; u.vy = Math.cos(u.age * 0.04) * 1.2 * WS;
+    u.age++; u.x += u.vx * SX;
+    u.y = u.base + Math.sin(u.age * 0.04) * 30 * SY; u.vy = Math.cos(u.age * 0.04) * 1.2;
     if (u.shots > 0 && --u.fireT <= 0 && match.ph === 'play') {
       const targets = [ship, opp].filter(o => o && o.alive);
       if (targets.length) {
         const t = targets[Math.floor(Math.random() * targets.length)];
-        ufoFire(u, Math.atan2(wrapDelta(t.y - u.y, H), wrapDelta(t.x - u.x, W)) + rand(-0.16, 0.16));
+        ufoFire(u, fieldAngleTo(wrapDelta(t.x - u.x, W), wrapDelta(t.y - u.y, H)) + rand(-0.16, 0.16));
       }
       u.shots--; u.fireT = 85;
     }
@@ -1848,7 +1859,7 @@ function takeHit(force = false) {
 function bounceOff(o, a) {
   let ddx = wrapDelta(o.x - a.x, W), ddy = wrapDelta(o.y - a.y, H);
   const d = Math.hypot(ddx, ddy) || 1; ddx /= d; ddy /= d;
-  o.vx = ddx * 3 * WS + a.vx; o.vy = ddy * 3 * WS + a.vy;
+  o.vx = ddx * 3 + a.vx; o.vy = ddy * 3 + a.vy;
   o.x = a.x + ddx * (a.r + CFG.SHIP_R + 1); o.y = a.y + ddy * (a.r + CFG.SHIP_R + 1); wrap(o);
 }
 
@@ -2082,21 +2093,21 @@ function update() {
     const live = canFly();
     ship.thrust = 0;
     if (live && !DESKTOP && joy.active && joy.mag > CFG.AIM_DEADZONE) {
-      ship.a += angDiff(joy.angle, ship.a) * CFG.TURN_LERP;               // facing ≠ travel direction
+      ship.a += angDiff(toFieldAngle(joy.angle), ship.a) * CFG.TURN_LERP;  // facing ≠ travel direction
       ship.thrust = clamp((joy.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
     } else if (live && DESKTOP) desktopSteer();
     if (match.ph !== 'intro') {
-      ship.vx += Math.cos(ship.a) * CFG.THRUST * WS * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * WS * ship.thrust;
+      ship.vx += Math.cos(ship.a) * CFG.THRUST * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * ship.thrust;
       ship.vx *= CFG.DRAG; ship.vy *= CFG.DRAG;                             // permanent drag
       const sp = Math.hypot(ship.vx, ship.vy);
-      if (sp > CFG.MAX_SPEED * WS) { ship.vx *= CFG.MAX_SPEED * WS / sp; ship.vy *= CFG.MAX_SPEED * WS / sp; }
-      ship.x += ship.vx; ship.y += ship.vy; wrap(ship);
+      if (sp > CFG.MAX_SPEED) { ship.vx *= CFG.MAX_SPEED / sp; ship.vy *= CFG.MAX_SPEED / sp; }
+      ship.x += ship.vx * SX; ship.y += ship.vy * SY; wrap(ship);
     }
     if (ship.invuln > 0) ship.invuln--;
     if (ship.shield > 0) ship.shield--;
     if (ship.thrust > 0.3) { learn.thrustTicks++; noteLearning(); }
     if (ship.thrust > 0.1) Sound.play('thrust', ship.thrust);
-    emitExhaust(ship.x, ship.y, ship.vx, ship.vy, ship.a, ship.thrust, ship.color);
+    emitExhaust(ship.x, ship.y, ship.vx * SX, ship.vy * SY, toScreenAngle(ship.a), ship.thrust, ship.color);
     damageFx(ship);
     if (fire.held) { fire.repeatAcc += CFG.TICK_MS; if (fire.repeatAcc >= CFG.FIRE_REPEAT_MS) tryFire(); }
   }
@@ -2125,25 +2136,25 @@ function update() {
   // ---- Rocks (guests glide mirrored rocks toward the host's positions) ----
   for (const a of world.asteroids) {
     if (a.tx !== undefined) {
-      a.tx += a.vx; a.ty += a.vy;
+      a.tx += a.vx * SX; a.ty += a.vy * SY;
       if (a.tx < 0) a.tx += W; else if (a.tx >= W) a.tx -= W;
       if (a.ty < 0) a.ty += H; else if (a.ty >= H) a.ty -= H;
-      a.x += a.vx + wrapDelta(a.tx - a.x, W) * 0.15; a.y += a.vy + wrapDelta(a.ty - a.y, H) * 0.15;
-    } else { a.x += a.vx; a.y += a.vy; }
+      a.x += a.vx * SX + wrapDelta(a.tx - a.x, W) * 0.15; a.y += a.vy * SY + wrapDelta(a.ty - a.y, H) * 0.15;
+    } else { a.x += a.vx * SX; a.y += a.vy * SY; }
     a.rot += a.spin; wrap(a);
   }
 
   // ---- UFOs ----
   if (auth) updateUfosAuthority();
   else for (const u of world.ufos) {
-    u.tx += u.vx; u.ty += u.vy;
-    u.x += u.vx + (u.tx - u.x) * 0.15; u.y += u.vy + (u.ty - u.y) * 0.15;
+    u.tx += u.vx * SX; u.ty += u.vy * SY;
+    u.x += u.vx * SX + (u.tx - u.x) * 0.15; u.y += u.vy * SY + (u.ty - u.y) * 0.15;
   }
 
   // ---- Bullets ----
   for (let i = world.bullets.length - 1; i >= 0; i--) {
     const b = world.bullets[i];
-    b.x += b.vx; b.y += b.vy; wrap(b);
+    b.x += b.vx * SX; b.y += b.vy * SY; wrap(b);
     if (--b.life <= 0 || bulletStep(b, auth)) world.bullets.splice(i, 1);
   }
 
@@ -2195,7 +2206,7 @@ function render() {
   if (state === 'play') {
     if (opp) opp.draw(tickCount);
     if (ship.alive && !(ship.invuln > 0 && !ship.shield && (tickCount >> 3) % 2 === 0))
-      drawWrapped(ship.x, ship.y, 20, (x, y) => drawShip(x, y, ship.a, ship.color, ship.thrust, tickCount, ship.hp));
+      drawWrapped(ship.x, ship.y, 20, (x, y) => drawShip(x, y, toScreenAngle(ship.a), ship.color, ship.thrust, tickCount, ship.hp));
     if (ship.alive && ship.shield > 0) drawShield(ship.x, ship.y, ship.color, ship.shield);
   }
   ctx.restore();
@@ -2319,8 +2330,8 @@ function frame(t) {
   Particles.quality = fpsAvg < 40 ? 0.4 : fpsAvg < 52 ? 0.7 : 1;
   if (!paused && !(menuOpen && mode !== 'online')) {
     acc += dt; let steps = 0;
-    while (acc >= CFG.TICK_MS && steps < 5) { update(); acc -= CFG.TICK_MS; steps++; }
-    if (steps === 5) acc = 0;
+    while (acc >= CFG.TICK_MS && steps < 8) { update(); acc -= CFG.TICK_MS; steps++; }
+    if (steps === 8) acc = 0;
   }
   render();
   syncHudButtons();
