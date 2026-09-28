@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-210107';
+const BUILD = '20260928-220219';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1440,16 +1440,24 @@ class QuickMatchAdapter extends TrysteroAdapter {
   }
   poolSize() { return this.seekers.size + 1; }
   async _enterPool() {
-    if (this.closed || this.matched) return;
+    if (this.closed || this.matched || this.entering) return;
+    this.entering = true;
+    try { await this._enterPoolOnce(); }
+    catch (e) {                                   // never leave a waiting pilot stranded: try again shortly
+      this.diag.err = String(e && e.message || e).slice(0, 60);
+      this._leavePool(); setTimeout(() => this._enterPool(), 3000);
+    } finally { this.entering = false; }
+  }
+  async _enterPoolOnce() {
     const T = trysteroLib();
     this.poolAttempt = (this.poolAttempt || 0) + 1;
-    const rtc = await rtcFor(this.poolAttempt);
+    const rtc = await rtcFor(1);                  // the pool never forces relay-only (only strict networks use it)
     if (this.closed || this.matched) return;
     this.myId = T.selfId || String(Math.random());
     if (!this.poolT0) this.poolT0 = Date.now();
-    let lobby;
-    try { lobby = T.joinRoom({ appId: TRYSTERO_APP, rtcConfig: rtc.rtcConfig }, QUICK_POOL); }
-    catch (e) { this.status = 'CONNECTION PROBLEM · ' + String(e && e.message || e).slice(0, 60); return; }
+    this.seekers = new Map(); this.pending = null; this.cool = new Map(); this.seenSince = new Map();
+    this.enteredAt = Date.now();
+    const lobby = T.joinRoom({ appId: TRYSTERO_APP, rtcConfig: rtc.rtcConfig }, QUICK_POOL);
     this.lobby = lobby;
     const aSeek = lobby.makeAction('seek'), aProp = lobby.makeAction('prop'), aAcc = lobby.makeAction('acc'), aRej = lobby.makeAction('rej');
     const send = (a, d, pid) => { try { a.send(d, pid ? { target: pid } : undefined).catch(() => {}); } catch (_) {} };
@@ -1464,11 +1472,14 @@ class QuickMatchAdapter extends TrysteroAdapter {
       if (!d || d.v !== 1 || !ctx || this.matched) return;
       if (d.done) { this.seekers.delete(ctx.peerId); return; }
       this.seekers.set(ctx.peerId, +d.t || 0);
+      if (!this.seenSince.has(ctx.peerId)) this.seenSince.set(ctx.peerId, Date.now());
       this._propose();
     };
     aProp.onMessage = (d, ctx) => {
       if (!ctx) return;
       const pid = ctx.peerId, code = sanitizeCode(d && d.code);
+      // Both proposed to each other at once: the lower id's proposal wins
+      if (this.pending && this.pending.pid === pid && this.myId > pid) { clearTimeout(this.pending.timer); this.pending = null; }
       if (this.matched || this.pending || code.length !== 4) { send(aRej, { v: 1 }, pid); return; }
       send(aAcc, { v: 1, code }, pid);
       this._matched('join', code);
@@ -1483,16 +1494,37 @@ class QuickMatchAdapter extends TrysteroAdapter {
       clearTimeout(this.pending.timer); this.cool.set(ctx.peerId, Date.now()); this.pending = null;
       setTimeout(() => this._propose(), 600 + Math.random() * 900);
     };
-    // keep the pool fresh: re-announce every 5 s, re-enter the pool every minute
-    clearInterval(this.poolTick); clearTimeout(this.poolRefresh);
-    this.poolTick = setInterval(() => { if (!this.matched) send(aSeek, { v: 1, t: this.poolT0 }); this._propose(); }, 5000);
-    this.poolRefresh = setTimeout(() => { if (!this.matched && !this.closed) { this._leavePool(); setTimeout(() => this._enterPool(), 800); } }, 60000);
+    // Keep the pool fresh: re-announce every 5 s. A lobby that has sat for a while can go
+    // deaf (relay sockets dropped, a half-open link), which is why backing out and pressing
+    // LAUNCH again used to fix it. Do that automatically:
+    //  · alone for 20 s              → leave and re-enter the pool from scratch
+    //  · someone seen but no match in 15 s → same (the pairing got stuck)
+    clearInterval(this.poolTick);
+    this.poolTick = setInterval(() => {
+      if (this.matched || this.closed) return;
+      send(aSeek, { v: 1, t: this.poolT0 }); this._propose();
+      const now = Date.now(), inPool = now - this.enteredAt;
+      const stuck = [...this.seenSince.values()].some(t => now - t > 15000);
+      if ((!this.seekers.size && inPool > 20000) || stuck) this._restartPool();
+    }, 5000);
+  }
+  /** Exactly what "quit + LAUNCH" did by hand: leave the pool, forget stale state, re-enter. */
+  _restartPool() {
+    if (this.closed || this.matched || this.restarting) return;
+    this.restarting = true; this.poolRestarts = (this.poolRestarts || 0) + 1;
+    const l = this._leavePool();
+    Promise.race([Promise.resolve(l), new Promise(r => setTimeout(r, 1500))])
+      .then(() => new Promise(r => setTimeout(r, 700 + Math.random() * 800)))
+      .then(() => { this.restarting = false; this._enterPool(); });
   }
   _propose() {
     if (this.matched || this.pending || this.closed || !this.aProp) return;
     const now = Date.now();
+    // Normally only the lower id proposes (so two pilots don't grab each other at once). If the
+    // lower one has stayed silent for 8 s it may not see us — then the higher one proposes too.
     const cands = [...this.seekers]
-      .filter(([pid]) => pid > this.myId && !((this.cool.get(pid) || 0) > now - 4000))
+      .filter(([pid]) => (pid > this.myId || now - (this.seenSince.get(pid) || now) > 8000)
+        && !((this.cool.get(pid) || 0) > now - 4000))
       .sort((a, b) => a[1] - b[1]);
     if (!cands.length) return;
     const pid = cands[0][0], code = generateRoomCode();
@@ -1515,8 +1547,9 @@ class QuickMatchAdapter extends TrysteroAdapter {
   }
   _leavePool() {
     clearInterval(this.poolTick); clearTimeout(this.poolRefresh);
+    if (this.pending) { clearTimeout(this.pending.timer); this.pending = null; }
     const l = this.lobby; this.lobby = null; this.aProp = null;
-    try { l && l.leave(); } catch (_) {}
+    try { return l && l.leave(); } catch (_) { return null; }
   }
   /** A random rival left: nothing to reopen. Close; the next Quick Match searches fresh. */
   _lost() {
@@ -1525,7 +1558,7 @@ class QuickMatchAdapter extends TrysteroAdapter {
     if (!this.closed) this.close();
   }
   report() {
-    if (this.searching) { const n = this.poolSize(); return `QUICK MATCH · ${n} PILOT${n === 1 ? '' : 'S'} SEARCHING`; }
+    if (this.searching) { const n = this.poolSize(); return `QUICK MATCH · ${n} PILOT${n === 1 ? '' : 'S'} SEARCHING` + (this.poolRestarts ? ` · REFRESHED ×${this.poolRestarts}` : ''); }
     return super.report();
   }
   close() { this._leavePool(); super.close(); }
