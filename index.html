@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-225124';
+const BUILD = '20260928-234853';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1365,6 +1365,8 @@ class TrysteroAdapter extends NetAdapter {
   }
   /** Leave the current room entirely (relays + half-open links) and join again from scratch. */
   _fresh() {
+    if (!this.partner && this.role === 'join') track('connect_retry', { mode: this.fromRandom ? 'quick' : 'join',
+      attempt: this.joinAttempt || 1, relay: this.diag && this.diag.relay ? 1 : 0, strict: strictNet === true ? 1 : 0 });
     clearTimeout(this.watchT); clearTimeout(this.noHostT);
     const old = this.room; this.room = null; this.hostPid = null; this.aP = null;
     try { old && old.leave(); } catch (_) {}
@@ -1386,6 +1388,9 @@ class TrysteroAdapter extends NetAdapter {
     }
   }
   _link(pid) {
+    track('match_found', { mode: this.fromRandom ? 'quick' : this.role, relay: this.diag && this.diag.relay ? 1 : 0,
+      strict: strictNet === true ? 1 : 0, attempts: this.joinAttempt || 1,
+      secs: Math.round((performance.now() - (this.startedAt || performance.now())) / 1000) });
     this.partner = pid; this.lastHeard = performance.now();
     this.connected = true; this.status = ''; this.diag.role = this.isHost ? 'host' : 'guest'; this.diag.err = '';
     clearTimeout(this.noHostT); clearTimeout(this.watchT); this.joinAttempt = 0;
@@ -1860,6 +1865,7 @@ function startGame() {
   const reuse = mode === 'online' && net.keepAlive && !net.closed && (
     (onlineRole === 'random' ? (net.fromRandom && net.linked && net.linked()) : (net.code === code && net.role === onlineRole)));
   if (!reuse) net.close();
+  track('game_start', { mode: modeLabel(), rematch: reuse ? 1 : 0 });
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
   Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false, surrendered: false });
@@ -2082,6 +2088,10 @@ function showFinal() {
   const title = document.getElementById('overTitle'), big = document.getElementById('finalScore'), info = document.getElementById('overInfo');
   const oppName = mode === 'bot' ? 'THE BOT' : 'YOUR RIVAL';
   closeMenu(true);
+  track('match_end', { mode: modeLabel(), rounds: match.rn,
+    result: match.surrendered ? 'surrender' : match.forfeit ? 'rival_left' : mode === 'practice' ? 'score'
+      : match.wins[0] > match.wins[1] ? 'win' : 'loss',
+    score: mode === 'practice' ? practiceTotal : match.wins[0] });
   if (match.surrendered) {
     title.textContent = 'SURRENDERED';
     big.textContent = `${match.wins[0]} – ${match.wins[1]}`;
@@ -2125,6 +2135,9 @@ function phaseFx() {
   }
   if (match.ph === lastPh) return;
   if (match.ph === 'play' && lastPh === 'intro') { Sound.play('go'); giveSpawnShield(); }
+  if (match.ph === 'result') track('round_end', { mode: modeLabel(), round: match.rn,
+    result: mode === 'practice' ? 'score' : match.res === 'me' ? 'win' : match.res === 'opp' ? 'loss' : 'draw',
+    how: match.why === 'k' ? 'kill' : 'time', score: match.sc[0] });
   if (match.ph === 'result') Sound.play(mode === 'practice' ? 'draw' : match.res === 'me' ? 'roundWin' : match.res === 'opp' ? 'roundLose' : 'draw');
   if (match.ph === 'intro') lastBeat = -1;
   lastPh = match.ph;
@@ -2830,6 +2843,8 @@ function ntFinish() {
     verdict = 'MAY NOT CONNECT. This network blocks direct links and the backup relay. Try the other network (Wi-Fi ↔ cellular), or turn off iCloud Private Relay / VPN, then run the test again.'; cls = 'bad';
   }
   ntVerdict.textContent = verdict; ntVerdict.className = 'nt-verdict ' + cls;
+  track('net_test', { verdict: cls, nat: (ntState.nat || {}).status || '-', relay: (ntState.turn || {}).status || '-',
+    rlink: (ntState.rlink || {}).status || '-', relays: (ntState.relays || {}).status || '-' });
   ntReport = [`Neon Asteroids network test · build ${BUILD} · ${new Date().toLocaleString()}`,
     ...NT_STEPS.map(([k, label]) => `${label}: ${(ntState[k] || {}).status || '-'} — ${(ntState[k] || {}).detail || ''}`),
     `Verdict: ${verdict}`].join('\n');
@@ -2868,6 +2883,35 @@ startBtn.addEventListener('click', () => {
   Sound.play('click');
   menuEl.classList.add('hidden'); startGame();
 });
+/* ---------------------------------------------------------------------
+   ANALYTICS — Google Analytics 4, visible only to the site owner.
+   Never runs inside Claude. No personal data: only game facts (mode, rounds,
+   results, network type). Country, device and browser come from GA itself.
+   Visitors in the EEA/UK/Switzerland are "denied" until they consent through
+   the site's consent message (Consent Mode v2).
+   Events:  game_start · match_found · connect_retry · connect_abandon ·
+            round_end · match_end · net_test · lib_fail
+   --------------------------------------------------------------------- */
+const GA_ID = 'G-GM3S9WFT1C';
+const CONSENT_REGIONS = ['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','IS','LI','NO','GB','CH'];
+function track(name, params = {}) {
+  try { if (window.gtag && GA_ID) window.gtag('event', name, Object.assign({ build: BUILD }, params)); } catch (_) {}
+}
+(function initAnalytics() {
+  if (!GA_ID || inClaude() || /^(localhost|127\.)/.test(location.hostname)) return;
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = function () { window.dataLayer.push(arguments); };
+  gtag('consent', 'default', { ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied', analytics_storage: 'denied', region: CONSENT_REGIONS, wait_for_update: 500 });
+  gtag('consent', 'default', { ad_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted', analytics_storage: 'granted' });
+  gtag('js', new Date());
+  gtag('config', GA_ID, { page_title: 'Neon Asteroids' });
+  const sc = document.createElement('script'); sc.async = true;
+  sc.src = 'https://www.googletagmanager.com/gtag/js?id=' + GA_ID;
+  document.head.appendChild(sc);
+  if (window.TrysteroFailed) track('lib_fail', { lib: 'trystero' });
+})();
+const modeLabel = () => mode === 'online' ? (onlineRole === 'random' ? 'quick' : onlineRole || 'online') : mode === 'practice' ? 'solo' : 'bot';
+
 /* ---------------------------------------------------------------------
    ADS — Google AdSense H5 Games Ads (Ad Placement API).
    Off until ADSENSE_CLIENT holds your publisher ID ("ca-pub-…"). Never runs inside Claude.
@@ -2917,6 +2961,9 @@ document.getElementById('againBtn').addEventListener('click', () => {
   if (mode === 'online') go(); else Ads.between('rematch', go);   // online rivals are waiting: no ad here
 });
 function backToMenu() {
+  if (state === 'play' && mode === 'online' && net.linked && !net.linked()) track('connect_abandon', {
+    mode: modeLabel(), secs: Math.round((performance.now() - (net.startedAt || performance.now())) / 1000),
+    relay: net.diag && net.diag.relay ? 1 : 0, strict: strictNet === true ? 1 : 0, attempts: net.joinAttempt || net.poolAttempt || 1 });
   net.close(); leaveTimer = 0;
   closeMenu(true);
   overEl.classList.add('hidden'); menuEl.classList.remove('hidden');
