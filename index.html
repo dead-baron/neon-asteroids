@@ -47,6 +47,8 @@
     font-family: "Courier New", ui-monospace, monospace;
   }
   canvas#game { position: fixed; inset: 0; width: 100vw; height: 100dvh; display: block; image-rendering: pixelated; }
+  /* Desktop: a portrait play area centered in the window, framed like an arcade screen */
+  canvas#game.cabinet { box-shadow: 0 0 0 1px #5a4aa8, 0 0 40px rgba(110,60,255,.35), 0 0 120px rgba(225,0,255,.12); cursor: crosshair; }
 
   .overlay {
     position: fixed; inset: 0;
@@ -118,7 +120,7 @@
     box-shadow: 0 0 10px rgba(0,240,255,.5); text-shadow: 0 0 8px var(--cyan);
     -webkit-user-select: text; user-select: text;
   }
-  #roleRow { max-width: 260px; }
+  #roleRow { max-width: 340px; }
   #roleRow .btn { padding: 10px 4px; }
 
   /* In-game menu button: top center, above the round clock */
@@ -175,6 +177,7 @@
     <div class="modes" id="roleRow">
       <button class="btn sel" data-role="host">HOST</button>
       <button class="btn"     data-role="join">JOIN</button>
+      <button class="btn"     data-role="random" id="randomRole">RANDOM</button>
     </div>
     <!-- Host: you get a code to share -->
     <div class="room" id="hostPanel">
@@ -190,6 +193,11 @@
       <div class="label">ENTER YOUR FRIEND'S CODE</div>
       <input id="roomCode" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code" placeholder="····">
     </div>
+    <!-- Random: matchmaking pool -->
+    <div class="room hidden" id="randomPanel">
+      <div class="label">QUICK MATCH</div>
+      <div class="note">You'll be paired with the next pilot who's also searching. One of you hosts automatically.</div>
+    </div>
     <div class="note" id="roomNote"></div>
     <div class="note" id="liveNote">LIVE LINK: CHECKING…</div>
   </div>
@@ -198,12 +206,7 @@
   <button class="btn small" id="soundBtn">SOUND: ON</button>
   <div class="note" id="buildTag"></div>
 
-  <div class="hint">
-    <b>FLY</b> (left thumb): drag to steer. Push far to thrust.<br>
-    <b>FIRE</b> (right thumb): tap to shoot. Hold for steady fire.<br>
-    Best of 3 · 1-minute rounds · 3 hits and you're scrap.<br>
-    Last ship flying or most points wins the round.
-  </div>
+  <div class="hint" id="howTo"></div>
 </div>
 
 <button id="updateBtn" class="hidden">NEW VERSION READY · TAP TO UPDATE</button>
@@ -250,7 +253,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-164509';
+const BUILD = '20260928-170132';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -261,6 +264,7 @@ const CFG = {
   THRUST: 0.2,
   MAX_SPEED: 7.5,
   TURN_LERP: 0.28,
+  KEY_TURN: 0.085,           // radians per tick when turning with keys
   AIM_DEADZONE: 0.12,
   THRUST_START: 0.4,         // below: aim only; above: aim + thrust
 
@@ -336,7 +340,16 @@ let W = 0, H = 0, DPR = 1, SAFE_TOP = 0, SAFE_BOTTOM = 0;
 
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
-  W = window.innerWidth; H = window.innerHeight;
+  if (DESKTOP) {
+    // Same portrait shape as a phone (about 1:2), centered, so online play looks the same on both
+    H = window.innerHeight; W = Math.min(window.innerWidth, Math.round(H * 0.5));
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    canvas.style.left = Math.round((window.innerWidth - W) / 2) + 'px';
+  } else {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.style.width = canvas.style.height = canvas.style.left = '';
+  }
+  canvas.classList.toggle('cabinet', DESKTOP && window.innerWidth > W + 8);
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.imageSmoothingEnabled = false;
@@ -580,19 +593,25 @@ const spark = (x, y) => Particles.burst(x, y, '#ffffff', 5, 2, 14);
    (remembered on this device). The zones keep working either way.
    Desktop: drag with the mouse on the left, click right or Space to fire.
    ===================================================================== */
+/** Control scheme: touch (phones/tablets) or desktop (keyboard + mouse). */
+const forcedControls = new URLSearchParams(location.search).get('controls');
+let DESKTOP = forcedControls ? forcedControls === 'desktop'
+  : !(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
 const joy = { active: false, id: null, bx: 0, by: 0, kx: 0, ky: 0, mag: 0, angle: 0 };
 const fire = { held: false, id: null, lastShot: -1e9, repeatAcc: 0, pulse: 0, tapX: 0, tapY: 0 };
 let now = 0;
 
 /** Tutorial guides: fade out after ~2 s of thrust and 8 shots. */
 const learn = { thrustTicks: 0, shots: 0, done: false, alpha: 1 };
-try { learn.done = localStorage.getItem('neonAsteroids.learned') === '1'; } catch (_) {}
+const learnKey = () => DESKTOP ? 'neonAsteroids.learnedDesktop' : 'neonAsteroids.learned';
+try { learn.done = localStorage.getItem(learnKey()) === '1'; } catch (_) {}
 if (learn.done) learn.alpha = 0;
 function noteLearning() {
   if (learn.done) return;
   if (learn.thrustTicks >= 120 && learn.shots >= 8) {
     learn.done = true;
-    try { localStorage.setItem('neonAsteroids.learned', '1'); } catch (_) {}
+    try { localStorage.setItem(learnKey(), '1'); } catch (_) {}
   }
 }
 
@@ -639,21 +658,111 @@ function pointerDown(id, x, y) {
 }
 function pointerUp(id) { fireRelease(id); joyEnd(id); }
 
-canvas.addEventListener('touchstart', e => { e.preventDefault(); for (const t of e.changedTouches) pointerDown(t.identifier, t.clientX, t.clientY); }, { passive: false });
-canvas.addEventListener('touchmove',  e => { e.preventDefault(); for (const t of e.changedTouches) joyMove(t.identifier, t.clientX, t.clientY); }, { passive: false });
+canvas.addEventListener('touchstart', e => { e.preventDefault(); useTouch(); for (const t of e.changedTouches) { const p = toLocal(t.clientX, t.clientY); pointerDown(t.identifier, p.x, p.y); } }, { passive: false });
+canvas.addEventListener('touchmove',  e => { e.preventDefault(); for (const t of e.changedTouches) { const p = toLocal(t.clientX, t.clientY); joyMove(t.identifier, p.x, p.y); } }, { passive: false });
 const touchEnd = e => { e.preventDefault(); for (const t of e.changedTouches) pointerUp(t.identifier); };
 canvas.addEventListener('touchend', touchEnd, { passive: false });
 canvas.addEventListener('touchcancel', touchEnd, { passive: false });
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('dblclick', e => e.preventDefault());
-canvas.addEventListener('mousedown', e => pointerDown('mouse', e.clientX, e.clientY));
-window.addEventListener('mousemove', e => joyMove('mouse', e.clientX, e.clientY));
-window.addEventListener('mouseup', () => pointerUp('mouse'));
+/* ---------------------------------------------------------------------
+   DESKTOP CONTROLS (auto-detected: no touch-first pointer)
+     Keyboard: W/↑ thrust · A D/← → turn · S/↓ brake · Space fire
+     Mouse:    ship turns to face the cursor · right-click (hold) thrust ·
+               left-click (hold) fire
+   Keys and mouse mix freely: turning keys take over aim until the mouse
+   moves again. Esc or P opens the menu. `?controls=touch|desktop` forces
+   a scheme. A touch on the screen switches to touch controls.
+   --------------------------------------------------------------------- */
+const keys = { up: false, down: false, left: false, right: false, lastTurn: 0 };
+const mouse = { x: 0, y: 0, inside: false, thrust: false, lastMove: -1 };
+const KEYMAP = { KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right' };
+function toLocal(cx, cy) { const r = canvas.getBoundingClientRect(); return { x: cx - r.left, y: cy - r.top }; }
+const typing = e => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+function clearDesktopInput() { keys.up = keys.down = keys.left = keys.right = false; mouse.thrust = false; fireRelease('key'); fireRelease('mouseL'); }
+function useTouch() { if (!DESKTOP) return; DESKTOP = false; clearDesktopInput(); applyControlScheme(); resize(); }
+
+/** Desktop steering, called from update() while the ship can fly. */
+function desktopSteer() {
+  const turn = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  if (turn) { ship.a += turn * CFG.KEY_TURN; keys.lastTurn = performance.now(); }
+  else if (mouse.inside && mouse.lastMove > keys.lastTurn) {
+    const dx = mouse.x - ship.x, dy = mouse.y - ship.y;
+    if (dx * dx + dy * dy > 14 * 14) ship.a += angDiff(Math.atan2(dy, dx), ship.a) * CFG.TURN_LERP;
+  }
+  if (keys.up || mouse.thrust) ship.thrust = 1;
+  if (keys.down) { ship.vx *= 0.95; ship.vy *= 0.95; }
+}
+
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && !e.repeat) { e.preventDefault(); firePress('key'); }
-  if (e.code === 'Escape' && state === 'play') { menuOpen ? closeMenu() : openMenu(); }
+  if (typing(e)) return;
+  if ((e.code === 'Escape' || e.code === 'KeyP') && state === 'play') { e.preventDefault(); menuOpen ? closeMenu() : openMenu(); return; }
+  if (state !== 'play' || menuOpen) return;
+  const k = KEYMAP[e.code];
+  if (k) { e.preventDefault(); keys[k] = true; Sound.unlock(); return; }
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) { Sound.unlock(); firePress('key'); } }
 });
-window.addEventListener('keyup', e => { if (e.code === 'Space') fireRelease('key'); });
+window.addEventListener('keyup', e => {
+  const k = KEYMAP[e.code];
+  if (k) keys[k] = false;
+  if (e.code === 'Space') fireRelease('key');
+});
+window.addEventListener('blur', clearDesktopInput);
+canvas.addEventListener('mousemove', e => {
+  if (!DESKTOP) return;
+  const p = toLocal(e.clientX, e.clientY);
+  mouse.x = p.x; mouse.y = p.y; mouse.inside = true; mouse.lastMove = performance.now();
+});
+canvas.addEventListener('mouseleave', () => { mouse.inside = false; });
+canvas.addEventListener('mousedown', e => {
+  if (!DESKTOP || state !== 'play' || menuOpen) return;
+  e.preventDefault(); Sound.unlock();
+  const p = toLocal(e.clientX, e.clientY);
+  mouse.x = p.x; mouse.y = p.y; mouse.inside = true; mouse.lastMove = performance.now();
+  if (e.button === 0) firePress('mouseL', p.x, p.y);
+  if (e.button === 2) mouse.thrust = true;
+});
+window.addEventListener('mouseup', e => {
+  if (e.button === 0) fireRelease('mouseL');
+  if (e.button === 2) mouse.thrust = false;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+/** Keyboard + mouse guide panels at the bottom; they fade once learned, like the touch guides. */
+function drawDesktopGuides(a, col) {
+  if (a <= 0.01) return;
+  const pad = 14, gap = 10, pw = (W - pad * 2 - gap) / 2, ph = 92, y0 = H - ph - 16 - SAFE_BOTTOM;
+  const panel = (x, title, rows) => {
+    ctx.globalAlpha = a * 0.85; ctx.fillStyle = 'rgba(5,1,15,0.7)'; ctx.fillRect(x, y0, pw, ph);
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.shadowColor = col; ctx.shadowBlur = 10;
+    ctx.strokeRect(Math.round(x) + 0.5, Math.round(y0) + 0.5, Math.round(pw), ph); ctx.shadowBlur = 0;
+    ctx.globalAlpha = a; ctx.textAlign = 'left'; ctx.fillStyle = col; ctx.font = 'bold 11px "Courier New", monospace';
+    ctx.fillText(title, x + 10, y0 + 17);
+    rows.forEach(([key, what, on], i) => {
+      const yy = y0 + 36 + i * 17;
+      ctx.globalAlpha = a * (on ? 1 : 0.8);
+      ctx.fillStyle = on ? col : '#ffffff'; ctx.font = 'bold 11px "Courier New", monospace'; ctx.fillText(key, x + 10, yy);
+      ctx.fillStyle = on ? col : '#9a8fd6'; ctx.font = '11px "Courier New", monospace'; ctx.textAlign = 'right'; ctx.fillText(what, x + pw - 10, yy); ctx.textAlign = 'left';
+    });
+    ctx.globalAlpha = 1;
+  };
+  panel(pad, 'KEYBOARD', [
+    ['W / ↑', 'THRUST', keys.up], ['A D / ← →', 'TURN', keys.left || keys.right], ['S / ↓', 'BRAKE', keys.down], ['SPACE', 'FIRE', fire.id === 'key' && fire.held],
+  ]);
+  panel(pad + pw + gap, 'MOUSE', [
+    ['MOVE', 'AIM', mouse.inside && mouse.lastMove > keys.lastTurn], ['RIGHT CLICK', 'THRUST', mouse.thrust], ['LEFT CLICK', 'FIRE', fire.id === 'mouseL' && fire.held], ['ESC', 'MENU', false],
+  ]);
+}
+
+/** Menu help text for the active control scheme. */
+function applyControlScheme() {
+  const how = document.getElementById('howTo');
+  if (!how) return;
+  how.innerHTML = DESKTOP
+    ? '<b>KEYBOARD:</b> W/↑ thrust · A D/← → turn · S/↓ brake · SPACE fire<br><b>MOUSE:</b> aim with the cursor · RIGHT CLICK thrust · LEFT CLICK fire<br>ESC opens the menu.<br>Best of 3 · 1-minute rounds · 3 hits and you\'re scrap.'
+    : '<b>FLY</b> (left thumb): drag to steer. Push far to thrust.<br><b>FIRE</b> (right thumb): tap to shoot. Hold for steady fire.<br>Best of 3 · 1-minute rounds · 3 hits and you\'re scrap.<br>Last ship flying or most points wins the round.';
+}
+
 
 /** A labeled round control guide (FLY / FIRE). */
 function drawGuide(x, y, r, label, sub, col, alpha, pressed) {
@@ -674,6 +783,7 @@ function drawControls() {
   learn.alpha = learn.done ? Math.max(0, learn.alpha - 0.02) : Math.min(1, learn.alpha + 0.05);
   const a = learn.alpha;
 
+  if (DESKTOP) { drawDesktopGuides(a, col); return; }
   // Tutorial guides at the bottom corners
   const fp = flyPad(), fb = fireBtn();
   if (a > 0) {
@@ -1253,6 +1363,118 @@ class TrysteroAdapter extends NetAdapter {
   }
 }
 
+/* ---------------------------------------------------------------------
+   QuickMatchAdapter — "RANDOM": join a shared waiting pool and get paired
+   with the next pilot who is also searching.
+   Pool = a Trystero room everyone searching joins. Each pilot announces
+   when they started waiting. To avoid two pilots grabbing each other at
+   once, only the pilot with the LOWER id proposes, to the longest-waiting
+   higher-id pilot, with a fresh room code. The other accepts if still free.
+   The proposer becomes host of that code, the accepter joins it, both
+   leave the pool, and the normal host/join flow takes over.
+   --------------------------------------------------------------------- */
+const QUICK_POOL = 'quick-match-pool-v1';
+
+class QuickMatchAdapter extends TrysteroAdapter {
+  connect() {
+    this.closed = false; this.fromRandom = true; this.searching = true; this.matched = false;
+    this.role = 'random'; this.code = ''; this.isHost = true; this.partner = null; this.attempt = 0;
+    this.startedAt = performance.now(); this.status = ''; this.diag = { role: 'matchmaking', err: '' };
+    this.seekers = new Map(); this.pending = null; this.cool = new Map();
+    this._whenLib(() => this._enterPool());
+  }
+  poolSize() { return this.seekers.size + 1; }
+  async _enterPool() {
+    if (this.closed || this.matched) return;
+    const T = trysteroLib();
+    const ice = await iceServers();
+    if (this.closed || this.matched) return;
+    this.myId = T.selfId || String(Math.random());
+    if (!this.poolT0) this.poolT0 = Date.now();
+    let lobby;
+    try { lobby = T.joinRoom({ appId: TRYSTERO_APP, rtcConfig: { iceServers: ice } }, QUICK_POOL); }
+    catch (e) { this.status = 'CONNECTION PROBLEM · ' + String(e && e.message || e).slice(0, 60); return; }
+    this.lobby = lobby;
+    const aSeek = lobby.makeAction('seek'), aProp = lobby.makeAction('prop'), aAcc = lobby.makeAction('acc'), aRej = lobby.makeAction('rej');
+    const send = (a, d, pid) => { try { a.send(d, pid ? { target: pid } : undefined).catch(() => {}); } catch (_) {} };
+    this.aSeek = aSeek; this.aProp = aProp; this._psend = send;
+
+    lobby.onPeerJoin = pid => send(aSeek, { v: 1, t: this.poolT0 }, pid);
+    lobby.onPeerLeave = pid => {
+      this.seekers.delete(pid);
+      if (this.pending && this.pending.pid === pid) { clearTimeout(this.pending.timer); this.pending = null; this._propose(); }
+    };
+    aSeek.onMessage = (d, ctx) => {
+      if (!d || d.v !== 1 || !ctx || this.matched) return;
+      if (d.done) { this.seekers.delete(ctx.peerId); return; }
+      this.seekers.set(ctx.peerId, +d.t || 0);
+      this._propose();
+    };
+    aProp.onMessage = (d, ctx) => {
+      if (!ctx) return;
+      const pid = ctx.peerId, code = sanitizeCode(d && d.code);
+      if (this.matched || this.pending || code.length !== 4) { send(aRej, { v: 1 }, pid); return; }
+      send(aAcc, { v: 1, code }, pid);
+      this._matched('join', code);
+    };
+    aAcc.onMessage = (d, ctx) => {
+      if (!ctx || !this.pending || ctx.peerId !== this.pending.pid || !d || d.code !== this.pending.code) return;
+      clearTimeout(this.pending.timer);
+      this._matched('host', this.pending.code);
+    };
+    aRej.onMessage = (d, ctx) => {
+      if (!ctx || !this.pending || ctx.peerId !== this.pending.pid) return;
+      clearTimeout(this.pending.timer); this.cool.set(ctx.peerId, Date.now()); this.pending = null;
+      setTimeout(() => this._propose(), 600 + Math.random() * 900);
+    };
+    // keep the pool fresh: re-announce every 5 s, re-enter the pool every minute
+    clearInterval(this.poolTick); clearTimeout(this.poolRefresh);
+    this.poolTick = setInterval(() => { if (!this.matched) send(aSeek, { v: 1, t: this.poolT0 }); this._propose(); }, 5000);
+    this.poolRefresh = setTimeout(() => { if (!this.matched && !this.closed) { this._leavePool(); setTimeout(() => this._enterPool(), 800); } }, 60000);
+  }
+  _propose() {
+    if (this.matched || this.pending || this.closed || !this.aProp) return;
+    const now = Date.now();
+    const cands = [...this.seekers]
+      .filter(([pid]) => pid > this.myId && !((this.cool.get(pid) || 0) > now - 4000))
+      .sort((a, b) => a[1] - b[1]);
+    if (!cands.length) return;
+    const pid = cands[0][0], code = generateRoomCode();
+    this.pending = { pid, code, timer: setTimeout(() => {
+      if (this.pending && this.pending.pid === pid) { this.cool.set(pid, Date.now()); this.pending = null; this._propose(); }
+    }, 5000) };
+    this._psend(this.aProp, { v: 1, code }, pid);
+  }
+  _matched(role, code) {
+    if (this.matched) return;
+    this.matched = true; this.searching = false; this.pending = null;
+    this._psend(this.aSeek, { v: 1, done: 1 });
+    setTimeout(() => this._leavePool(), 400);
+    this.role = role; this.isHost = role === 'host'; this.code = code; this.startedAt = performance.now();
+    this.diag.role = role === 'host' ? 'opening room' : 'joining';
+    this.status = role === 'host' ? '' : 'CONNECTING…';
+    Sound.play('go');
+    this.emit('code', { code });
+    setTimeout(() => this._join(), role === 'host' ? 0 : 1500);   // give the host a head start
+  }
+  _leavePool() {
+    clearInterval(this.poolTick); clearTimeout(this.poolRefresh);
+    const l = this.lobby; this.lobby = null; this.aProp = null;
+    try { l && l.leave(); } catch (_) {}
+  }
+  /** A random rival left: nothing to reopen. Close; the next Quick Match searches fresh. */
+  _lost() {
+    const id = this.partner; this.partner = null;
+    this.lastShots.delete(id); this.emit('leave', { id, bye: true });
+    if (!this.closed) this.close();
+  }
+  report() {
+    if (this.searching) { const n = this.poolSize(); return `QUICK MATCH · ${n} PILOT${n === 1 ? '' : 'S'} SEARCHING`; }
+    return super.report();
+  }
+  close() { this._leavePool(); super.close(); }
+}
+
 /** Open-web transport: Trystero (many relays); PeerJS if Trystero can't load or `?net=peerjs`. */
 function webAdapter() {
   const forced = new URLSearchParams(location.search).get('net');
@@ -1506,7 +1728,8 @@ function updateUfosAuthority() {
 function startGame() {
   // Rematch on a live direct link: keep it (no trip back through matchmaking)
   const code = currentCode();
-  const reuse = mode === 'online' && net.keepAlive && !net.closed && net.code === code && net.role === onlineRole;
+  const reuse = mode === 'online' && net.keepAlive && !net.closed && (
+    (onlineRole === 'random' ? (net.fromRandom && net.linked && net.linked()) : (net.code === code && net.role === onlineRole)));
   if (!reuse) net.close();
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
@@ -1515,14 +1738,14 @@ function startGame() {
   joy.active = false; fire.held = false; ship.shots = 0;
   roomCode = '';
   if (mode === 'online') {
-    roomCode = code || generateRoomCode();
-    showCode(roomCode);
+    roomCode = onlineRole === 'random' ? (reuse ? net.code : '') : (code || generateRoomCode());
+    if (onlineRole !== 'random') showCode(roomCode);
     if (reuse) {
       wasHost = net.isHost; awaitingFirstSnap = !net.isHost;
       resetShipForRound();
       spawnTier(TIERS[1]);
     } else {
-      net = inClaude() ? new RoomAdapter() : webAdapter(); wireNetHandlers(net);
+      net = inClaude() ? new RoomAdapter() : onlineRole === 'random' ? new QuickMatchAdapter() : webAdapter(); wireNetHandlers(net);
       awaitingFirstSnap = true; wasHost = true;
       resetShipForRound();
       spawnTier(TIERS[1]);                          // warm-up field while waiting
@@ -1643,7 +1866,7 @@ function wireNetHandlers(n) {
     else remotes.delete(m.id);
   });
   n.on('snapshot', applySnapshot);
-  n.on('code', m => { roomCode = m.code; showCode(m.code); });   // host's code was taken: a fresh one was picked
+  n.on('code', m => { roomCode = m.code; if (onlineRole !== 'random') showCode(m.code); });   // code picked (taken code / quick match)
   n.on('full', () => {
     net.close(); state = 'menu'; opp = null;
     menuEl.classList.remove('hidden'); seedAmbient();
@@ -1850,10 +2073,11 @@ function update() {
   // ---- My ship ----
   if (playing && ship.alive) {
     const live = canFly();
-    if (live && joy.active && joy.mag > CFG.AIM_DEADZONE) {
+    ship.thrust = 0;
+    if (live && !DESKTOP && joy.active && joy.mag > CFG.AIM_DEADZONE) {
       ship.a += angDiff(joy.angle, ship.a) * CFG.TURN_LERP;               // facing ≠ travel direction
       ship.thrust = clamp((joy.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
-    } else ship.thrust = 0;
+    } else if (live && DESKTOP) desktopSteer();
     if (match.ph !== 'intro') {
       ship.vx += Math.cos(ship.a) * CFG.THRUST * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * ship.thrust;
       ship.vx *= CFG.DRAG; ship.vy *= CFG.DRAG;                             // permanent drag
@@ -2026,7 +2250,7 @@ function drawHUD() {
   }
   if (mode === 'online') {
     const searching = !net.status || net.status === 'CONNECTING…' || net.status.startsWith('STILL SEARCHING') || net.status === 'OPENING ROOM…';
-    const line = net.status ? (searching ? 'CONNECTING…' : 'NOT ONLINE') : (opp ? `ROOM ${roomCode} · ${net.isHost ? 'HOST' : 'GUEST'}` : `ROOM ${roomCode}`);
+    const line = net.searching ? 'QUICK MATCH' : net.status ? (searching ? 'CONNECTING…' : 'NOT ONLINE') : (opp ? `ROOM ${roomCode} · ${net.isHost ? 'HOST' : 'GUEST'}` : `ROOM ${roomCode}`);
     glowText(line, W / 2, top + 66, net.status ? '#ff9f1c' : '#8b80c4', 10, 'center', 0);
   }
 }
@@ -2037,8 +2261,14 @@ function drawBanners() {
   if (match.ph === 'wait') {
     const cy = H * 0.17;
     const joining = net.role === 'join';
-    glowText(joining ? 'JOINING ROOM' : 'WAITING FOR RIVAL', W / 2, cy, '#ffffff', 22, 'center');
-    glowText(joining ? roomCode : `YOUR CODE ${roomCode}`, W / 2, cy + 30, ship.color, joining ? 22 : 16, 'center');
+    if (net.searching) {
+      const secs = Math.floor((performance.now() - (net.startedAt || performance.now())) / 1000);
+      glowText('FINDING AN OPPONENT', W / 2, cy, '#ffffff', 22, 'center');
+      glowText(`${net.poolSize()} PILOT${net.poolSize() === 1 ? '' : 'S'} SEARCHING · ${secs}s`, W / 2, cy + 30, ship.color, 14, 'center');
+    } else {
+      glowText(joining ? 'JOINING ROOM' : net.fromRandom ? 'OPPONENT FOUND' : 'WAITING FOR RIVAL', W / 2, cy, '#ffffff', 22, 'center');
+      glowText(joining ? roomCode : net.fromRandom ? 'CONNECTING…' : `YOUR CODE ${roomCode}`, W / 2, cy + 30, ship.color, joining ? 22 : 16, 'center');
+    }
     glowText('Warm up: nothing counts yet', W / 2, cy + 54, '#8b80c4', 11, 'center', 0);
     let yy = cy + 80;
     if (net.role === 'join' && !(net.linked && net.linked()) && (net.status === 'CONNECTING…' || !net.status)) {
@@ -2116,7 +2346,7 @@ let onlineRole = 'host';                         // 'host' | 'join'
 let menuOpen = false;
 
 /** The room code for the chosen role: the one you host, or the one you typed. */
-function currentCode() { return onlineRole === 'host' ? hostCodeEl.textContent.trim() : sanitizeCode(codeInput.value); }
+function currentCode() { return onlineRole === 'host' ? hostCodeEl.textContent.trim() : onlineRole === 'join' ? sanitizeCode(codeInput.value) : ''; }
 function showCode(code) { if (onlineRole === 'host') hostCodeEl.textContent = code; else codeInput.value = code; }
 
 const HOST_NOTE = inClaude()
@@ -2129,14 +2359,16 @@ function refreshMenu() {
   roomBox.classList.toggle('hidden', mode !== 'online');
   document.getElementById('hostPanel').classList.toggle('hidden', onlineRole !== 'host');
   document.getElementById('joinPanel').classList.toggle('hidden', onlineRole !== 'join');
+  document.getElementById('randomPanel').classList.toggle('hidden', onlineRole !== 'random');
   document.querySelectorAll('[data-role]').forEach(b => b.classList.toggle('sel', b.dataset.role === onlineRole));
-  startBtn.textContent = mode !== 'online' ? 'LAUNCH' : onlineRole === 'host' ? 'HOST GAME' : 'JOIN GAME';
-  if (!roomNote.dataset.custom) { roomNote.textContent = onlineRole === 'host' ? HOST_NOTE : JOIN_NOTE; roomNote.classList.remove('warn'); }
+  startBtn.textContent = mode !== 'online' ? 'LAUNCH' : onlineRole === 'host' ? 'HOST GAME' : onlineRole === 'join' ? 'JOIN GAME' : 'FIND MATCH';
+  if (!roomNote.dataset.custom) { roomNote.textContent = onlineRole === 'host' ? HOST_NOTE : onlineRole === 'join' ? JOIN_NOTE : ''; roomNote.classList.remove('warn'); }
 }
 function setNote(text, warn = false) { roomNote.textContent = text; roomNote.dataset.custom = '1'; roomNote.classList.toggle('warn', warn); }
 function clearNote() { delete roomNote.dataset.custom; refreshMenu(); }
 
 hostCodeEl.textContent = generateRoomCode();
+if (inClaude()) document.getElementById('randomRole').hidden = true;   // quick match needs the open-web matchmaker
 codeInput.addEventListener('input', () => { codeInput.value = sanitizeCode(codeInput.value); clearNote(); });
 document.getElementById('newCode').addEventListener('click', () => { Sound.play('click'); hostCodeEl.textContent = generateRoomCode(); clearNote(); });
 document.querySelectorAll('[data-role]').forEach(b => b.addEventListener('click', () => {
@@ -2270,7 +2502,7 @@ document.getElementById('menuBtn').addEventListener('click', () => { Sound.play(
 /* ---------- In-game menu: keep playing / surrender / quit ---------- */
 function openMenu() {
   if (state !== 'play') return;
-  menuOpen = true; joy.active = false; fire.held = false;
+  menuOpen = true; joy.active = false; fire.held = false; clearDesktopInput();
   const vs = mode !== 'practice' && match.rn > 0;
   document.getElementById('pauseTitle').textContent = mode === 'online' ? 'MENU' : 'PAUSED';
   document.getElementById('pauseInfo').textContent = mode === 'online'
@@ -2297,13 +2529,14 @@ document.getElementById('quitBtn').addEventListener('click', () => { Sound.play(
 /** HUD buttons live in the page, not the canvas: show them only when they apply. */
 function syncHudButtons() {
   pauseBtn.classList.toggle('hidden', state !== 'play' || menuOpen);
-  const showShare = state === 'play' && !menuOpen && mode === 'online' && !inClaude() && net.role === 'host' && match.ph === 'wait' && !net.linked?.();
+  const showShare = state === 'play' && !menuOpen && mode === 'online' && !inClaude() && net.role === 'host' && !net.fromRandom && match.ph === 'wait' && !net.linked?.();
   waitShare.classList.toggle('hidden', !showShare);
   if (showShare) waitShare.style.top = Math.round(H * 0.17 + 104) + 'px';
   else if (waitShare.textContent !== 'SHARE INVITE LINK') waitShare.textContent = 'SHARE INVITE LINK';
 }
 
 refreshMenu();
+applyControlScheme();
 
 // Tell the rival we're gone as soon as the page closes
 window.addEventListener('pagehide', () => { try { net.close(); } catch (_) {} });
