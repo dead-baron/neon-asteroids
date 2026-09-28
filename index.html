@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-194356';
+const BUILD = '20260928-201113';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1313,7 +1313,7 @@ class TrysteroAdapter extends NetAdapter {
     const ice = await iceServers();
     if (this.closed) return;
     this.joinAttempt = (this.joinAttempt || 0) + 1;
-    this.diag.turn = ice.some(s => String(s.urls).includes('turn:'));
+    this.diag.turn = ice.some(isTurn);
     let room;
     try {
       room = T.joinRoom(
@@ -1553,8 +1553,22 @@ const inClaude = () => !!(window.claude && typeof window.claude.use === 'functio
    --------------------------------------------------------------------- */
 const TURN_API_URL = '';
 const STUN_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun.relay.metered.ca:80' },
 ];
+/** The game's own backup relay (Metered, dead-baron's free account). Tried first when a
+ *  direct link is blocked. UDP 80, TCP 80, UDP 443 and TLS 443 cover strict networks. */
+const METERED_TURN = {
+  urls: [
+    'turn:global.relay.metered.ca:80',
+    'turn:global.relay.metered.ca:80?transport=tcp',
+    'turn:global.relay.metered.ca:443',
+    'turns:global.relay.metered.ca:443?transport=tcp',
+  ],
+  username: 'c9c0aac7648fe5536290ed7c',
+  credential: 'ycotpF9yAbeN2DrD',
+};
+/** True for a TURN entry (turn: or turns:). */
+const isTurn = s => [].concat(s.urls).some(u => /^turns?:/.test(String(u)));
 let iceCache = null, iceCacheAt = 0;
 async function openRelayTurn() {
   const username = `${Math.floor(Date.now() / 1000) + 12 * 3600}:neonasteroids`;
@@ -1577,7 +1591,7 @@ async function iceServers() {
     if (TURN_API_URL) {
       try { const r = await fetch(TURN_API_URL); const list = await r.json(); if (Array.isArray(list) && list.length) return list; } catch (_) {}
     }
-    try { return [await openRelayTurn()]; } catch (_) { return []; }
+    return [METERED_TURN];
   })();
   const timeout = new Promise(res => setTimeout(() => res([]), 3000));
   const extra = await Promise.race([turn, timeout]);
@@ -2669,7 +2683,7 @@ async function runNetworkTest() {
     ntSet('relays', n >= 2 ? 'ok' : n === 1 ? 'warn' : 'fail', `${n} of ${NT_RELAYS.length} public relays reachable${n ? '' : ' (network may block them)'}`);
   })();
   const ice = hasRTC ? await iceServers() : [];
-  const stun = ice.filter(x => !String(x.urls).includes('turn:')), turn = ice.filter(x => String(x.urls).includes('turn:'));
+  const stun = ice.filter(x => !isTurn(x)), turn = ice.filter(x => isTurn(x));
   const direct = (async () => {
     if (!hasRTC) { ntSet('direct', 'fail', 'Browser has no WebRTC'); ntSet('nat', 'skip', ''); return; }
     const g = await iceGather(stun, 'all');

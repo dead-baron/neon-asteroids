@@ -34,8 +34,8 @@ Phones and tablets get touch controls; computers get keyboard + mouse automatica
 - Rooms are 1v1. Room codes map to Trystero room `room-<code>` (app id `neon-asteroids-duel-v1`),
   or PeerJS id `neon-asteroids-duel-v1-<code>` on the fallback.
 - When a network blocks direct connections (common on mobile data), traffic goes through a TURN relay.
-  The default is the Open Relay Project's public static-auth service. For a dedicated relay, sign up for a free
-  Metered account and paste your credentials URL into `TURN_API_URL` in `index.html`.
+  The game uses its own free Metered relay (`METERED_TURN` in `index.html`). To swap it, create a new credential
+  in the Metered dashboard and replace the username/credential there (or set `TURN_API_URL`).
 - Connections reset themselves: a joiner that can't link in 25 s retries from scratch, an idle host reopens its
   room every minute, and when a rival leaves the host reopens a clean room while the joiner's next match starts fresh.
 - To use your own PeerJS server, add `?peerhost=your.host:443` to the URL.
