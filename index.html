@@ -259,7 +259,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-172809';
+const BUILD = '20260928-173402';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -343,12 +343,18 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
 const bg = document.createElement('canvas');
 let W = 0, H = 0, DPR = 1, SAFE_TOP = 0, SAFE_BOTTOM = 0;
+/** Speed scale. Physics runs in screen pixels, so a big window would feel slow; every
+ *  speed (ship, bullets, rocks, UFOs, bot) is multiplied by WS so crossing the screen
+ *  takes the same time on a phone, a tablet or a wide monitor. 1.0 = phone-sized screen. */
+let WS = 1;
+const REF_AREA = 412 * 860;
 
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   // Full window on every device. Online positions travel as fractions of the screen,
   // so a phone and a wide monitor still share one playfield.
   W = window.innerWidth; H = window.innerHeight;
+  WS = clamp(Math.sqrt((W * H) / REF_AREA), 0.75, 3.5);
   canvas.classList.toggle('desk', DESKTOP);
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -534,7 +540,7 @@ function makeAsteroid(x, y, size, speedMul = 1, id = nextAstId++ % 1e6) {
   const r = mulberry32(id * 2654435761);                 // same outline on every client
   const n = 7 + Math.floor(r() * 5), pts = [];
   for (let i = 0; i < n; i++) pts.push({ a: (i / n) * TAU + (r() - 0.5) * 0.3, d: 0.7 + r() * 0.35 });
-  const dir = Math.random() * TAU, sp = rand(0.5, 1.2) * (1 + (3 - size) * 0.4) * speedMul;
+  const dir = Math.random() * TAU, sp = rand(0.5, 1.2) * (1 + (3 - size) * 0.4) * speedMul * WS;
   return { id, x, y, vx: Math.cos(dir) * sp, vy: Math.sin(dir) * sp, r: AST_RADIUS[size], size,
            rot: r() * TAU, spin: (r() - 0.5) * 0.05, pts, color: AST_COLORS[size], tx: undefined, ty: undefined };
 }
@@ -562,8 +568,8 @@ function spawnBullet(x, y, vx, vy, color, owner, life = CFG.BULLET_LIFE) {
 }
 function shootFrom(o, color, owner) {
   const c = Math.cos(o.a), s = Math.sin(o.a);
-  spawnBullet(o.x + c * 16, o.y + s * 16, c * CFG.BULLET_SPEED + o.vx * CFG.BULLET_INHERIT,
-    s * CFG.BULLET_SPEED + o.vy * CFG.BULLET_INHERIT, color, owner);
+  spawnBullet(o.x + c * 16, o.y + s * 16, c * CFG.BULLET_SPEED * WS + o.vx * CFG.BULLET_INHERIT,
+    s * CFG.BULLET_SPEED * WS + o.vy * CFG.BULLET_INHERIT, color, owner);
 }
 function fireLocal() { shootFrom(ship, ship.color, 'local'); ship.shots++; Sound.play('shoot'); }
 
@@ -925,7 +931,7 @@ class NetAdapter {
       const c = Math.cos(m.a), sn = Math.sin(m.a);
       for (let i = 0; i < Math.min(3, sh - prev); i++) this.emit('fire', {
         id: peerId, x: m.x + c * 16, y: m.y + sn * 16,
-        vx: c * CFG.BULLET_SPEED + m.vx * CFG.BULLET_INHERIT, vy: sn * CFG.BULLET_SPEED + m.vy * CFG.BULLET_INHERIT,
+        vx: c * CFG.BULLET_SPEED * WS + m.vx * CFG.BULLET_INHERIT, vy: sn * CFG.BULLET_SPEED * WS + m.vy * CFG.BULLET_INHERIT,
       });
     }
     this.lastShots.set(peerId, sh);
@@ -1625,10 +1631,10 @@ class BotShip {
     } else this.thr = 0;
     if (!live) this.thr = 0;
     if (want !== undefined) this.a += angDiff(want + (avoid ? 0 : this.aimErr), this.a) * 0.1;
-    this.vx += Math.cos(this.a) * CFG.THRUST * this.thr; this.vy += Math.sin(this.a) * CFG.THRUST * this.thr;
+    this.vx += Math.cos(this.a) * CFG.THRUST * WS * this.thr; this.vy += Math.sin(this.a) * CFG.THRUST * WS * this.thr;
     this.vx *= CFG.DRAG; this.vy *= CFG.DRAG;
     const sp = Math.hypot(this.vx, this.vy);
-    if (sp > CFG.MAX_SPEED) { this.vx *= CFG.MAX_SPEED / sp; this.vy *= CFG.MAX_SPEED / sp; }
+    if (sp > CFG.MAX_SPEED * WS) { this.vx *= CFG.MAX_SPEED * WS / sp; this.vy *= CFG.MAX_SPEED * WS / sp; }
     this.x += this.vx; this.y += this.vy; wrap(this);
     this.cd -= CFG.TICK_MS;
     if (live && !avoid && want !== undefined && Math.abs(angDiff(want, this.a)) < 0.22 && this.cd <= 0) {
@@ -1699,13 +1705,13 @@ let nextUfoId = 1;
 function spawnUfo() {
   const left = Math.random() < 0.5, y = H * rand(0.12, 0.7);
   Sound.play('ufo');
-  world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7), vy: 0,
+  world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7) * WS, vy: 0,
                     age: 0, fireT: 70, shots: CFG.UFO_SHOTS, sh: 0, aim: 0 });
 }
 function ufoFire(u, ang) {
   u.sh++; u.aim = ang; Sound.play('ufoShot');
   const c = Math.cos(ang), s = Math.sin(ang);
-  spawnBullet(u.x + c * 16, u.y + s * 16, c * CFG.UFO_BULLET_SPEED, s * CFG.UFO_BULLET_SPEED, UFO_COLOR, 'ufo', CFG.UFO_BULLET_LIFE);
+  spawnBullet(u.x + c * 16, u.y + s * 16, c * CFG.UFO_BULLET_SPEED * WS, s * CFG.UFO_BULLET_SPEED * WS, UFO_COLOR, 'ufo', CFG.UFO_BULLET_LIFE);
 }
 
 /** Host: UFOs cruise across, bob, and take a few aimed-ish shots at pilots. */
@@ -1713,7 +1719,7 @@ function updateUfosAuthority() {
   for (let i = world.ufos.length - 1; i >= 0; i--) {
     const u = world.ufos[i];
     u.age++; u.x += u.vx;
-    u.y = u.base + Math.sin(u.age * 0.04) * 30; u.vy = Math.cos(u.age * 0.04) * 1.2;
+    u.y = u.base + Math.sin(u.age * 0.04) * 30 * WS; u.vy = Math.cos(u.age * 0.04) * 1.2 * WS;
     if (u.shots > 0 && --u.fireT <= 0 && match.ph === 'play') {
       const targets = [ship, opp].filter(o => o && o.alive);
       if (targets.length) {
@@ -1842,7 +1848,7 @@ function takeHit(force = false) {
 function bounceOff(o, a) {
   let ddx = wrapDelta(o.x - a.x, W), ddy = wrapDelta(o.y - a.y, H);
   const d = Math.hypot(ddx, ddy) || 1; ddx /= d; ddy /= d;
-  o.vx = ddx * 3 + a.vx; o.vy = ddy * 3 + a.vy;
+  o.vx = ddx * 3 * WS + a.vx; o.vy = ddy * 3 * WS + a.vy;
   o.x = a.x + ddx * (a.r + CFG.SHIP_R + 1); o.y = a.y + ddy * (a.r + CFG.SHIP_R + 1); wrap(o);
 }
 
@@ -2080,10 +2086,10 @@ function update() {
       ship.thrust = clamp((joy.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
     } else if (live && DESKTOP) desktopSteer();
     if (match.ph !== 'intro') {
-      ship.vx += Math.cos(ship.a) * CFG.THRUST * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * ship.thrust;
+      ship.vx += Math.cos(ship.a) * CFG.THRUST * WS * ship.thrust; ship.vy += Math.sin(ship.a) * CFG.THRUST * WS * ship.thrust;
       ship.vx *= CFG.DRAG; ship.vy *= CFG.DRAG;                             // permanent drag
       const sp = Math.hypot(ship.vx, ship.vy);
-      if (sp > CFG.MAX_SPEED) { ship.vx *= CFG.MAX_SPEED / sp; ship.vy *= CFG.MAX_SPEED / sp; }
+      if (sp > CFG.MAX_SPEED * WS) { ship.vx *= CFG.MAX_SPEED * WS / sp; ship.vy *= CFG.MAX_SPEED * WS / sp; }
       ship.x += ship.vx; ship.y += ship.vy; wrap(ship);
     }
     if (ship.invuln > 0) ship.invuln--;
