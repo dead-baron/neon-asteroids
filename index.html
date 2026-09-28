@@ -250,7 +250,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-163200';
+const BUILD = '20260928-164509';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -957,9 +957,7 @@ const PEER_PREFIX = 'neon-asteroids-duel-v1-';
 const PeerCtor = () => window.Peer || (window.peerjs && window.peerjs.Peer) || null;
 /** Matchmaking options. `?peerhost=host:port` points at a self-hosted PeerJS server. */
 function peerOptions() {
-  const opts = { debug: 0, config: { iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' },
-  ] } };
+  const opts = { debug: 0, config: { iceServers: iceCache || STUN_SERVERS } };
   const custom = new URLSearchParams(location.search).get('peerhost');
   if (custom) {
     const [h, p] = custom.split(':');
@@ -1146,13 +1144,17 @@ class TrysteroAdapter extends NetAdapter {
     setTimeout(() => this._whenLib(fn), 500);
   }
   linked() { return !!this.partner; }
-  _join() {
+  async _join() {
     if (this.closed) return;
     const T = trysteroLib();
+    const ice = await iceServers();
+    if (this.closed) return;
+    this.joinAttempt = (this.joinAttempt || 0) + 1;
+    this.diag.turn = ice.some(s => String(s.urls).includes('turn:'));
     let room;
     try {
       room = T.joinRoom(
-        { appId: TRYSTERO_APP, rtcConfig: { iceServers: peerOptions().config.iceServers } },
+        { appId: TRYSTERO_APP, rtcConfig: { iceServers: ice } },
         'room-' + this.code.toLowerCase(),
         { onJoinError: e => { this.diag.err = String((e && (e.error || e.message)) || 'join error').slice(0, 60); } },
       );
@@ -1181,9 +1183,24 @@ class TrysteroAdapter extends NetAdapter {
       else if (pid === this.hostPid) this.hostPid = null;
     };
     clearTimeout(this.noHostT);
-    if (this.role === 'join') this.noHostT = setTimeout(() => {
-      if (!this.partner && !this.closed) this.status = `STILL SEARCHING FOR ROOM ${this.code} · MAKE SURE THE CODE MATCHES AND THE HOST IS WAITING`;
-    }, 30000);
+    if (this.role === 'join' && this.joinAttempt >= 3) {
+      this.status = `STILL SEARCHING FOR ROOM ${this.code} · MAKE SURE THE CODE MATCHES AND THE HOST IS WAITING`;
+    }
+    this._armWatchdog();
+  }
+  /** Not linked in time? Throw the attempt away and start completely fresh. */
+  _armWatchdog() {
+    clearTimeout(this.watchT);
+    const ms = this.role === 'join' ? 25000 : 60000;
+    this.watchT = setTimeout(() => { if (!this.closed && !this.partner) this._fresh(); }, ms);
+  }
+  /** Leave the current room entirely (relays + half-open links) and join again from scratch. */
+  _fresh() {
+    clearTimeout(this.watchT); clearTimeout(this.noHostT);
+    const old = this.room; this.room = null; this.hostPid = null; this.aP = null;
+    try { old && old.leave(); } catch (_) {}
+    if (this.closed) return;
+    setTimeout(() => this._join(), 1200);
   }
   _onHi(d, pid) {
     if (!pid || !d || typeof d !== 'object') return;
@@ -1202,12 +1219,15 @@ class TrysteroAdapter extends NetAdapter {
   _link(pid) {
     this.partner = pid; this.lastHeard = performance.now();
     this.connected = true; this.status = ''; this.diag.role = this.isHost ? 'host' : 'guest'; this.diag.err = '';
-    clearTimeout(this.noHostT);
+    clearTimeout(this.noHostT); clearTimeout(this.watchT); this.joinAttempt = 0;
   }
+  /** Rival gone (left, quit, surrendered or went silent): reset so the next match starts clean. */
   _lost() {
     const id = this.partner; this.partner = null;
     this.lastShots.delete(id); this.emit('leave', { id, bye: true });
-    if (this.role === 'join' && !this.closed) this.status = 'HOST LEFT · WAITING FOR THEM TO COME BACK…';
+    if (this.closed) return;
+    if (this.role === 'host') this._fresh();          // host: reopen a clean room, ready for the next player
+    else { this.status = 'HOST LEFT'; this.close(); } // joiner: done; Rematch will join from scratch
   }
   _rehost() {
     try { this.room && this.room.leave(); } catch (_) {}
@@ -1222,10 +1242,11 @@ class TrysteroAdapter extends NetAdapter {
   }
   report() {
     const d = this.diag || {};
-    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.partner ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.err && !this.partner ? ` · ${d.err}` : '');
+    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.partner ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.turn ? ' · RELAY READY' : '')
+      + (!this.partner && this.joinAttempt > 1 ? ` · ATTEMPT ${this.joinAttempt}` : '') + (d.err && !this.partner ? ` · ${d.err}` : '');
   }
   close() {
-    super.close(); this.closed = true; clearTimeout(this.noHostT);
+    super.close(); this.closed = true; clearTimeout(this.noHostT); clearTimeout(this.watchT);
     if (this.partner && this.aP) this._send(this.aP, { v: 1, on: 0, bye: 1 }, this.partner);
     const room = this.room; this.partner = null;
     setTimeout(() => { try { room && room.leave(); } catch (_) {} }, 200);
@@ -1242,6 +1263,54 @@ function webAdapter() {
 
 /** Direct links when on the open web; Claude's live channel inside Claude. */
 const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
+
+/* ---------------------------------------------------------------------
+   ICE servers (how two phones find a path to each other).
+   - STUN lets phones discover their public address; enough on many networks.
+   - TURN relays the game traffic when a direct link is blocked (common on
+     mobile data and some routers). Without it, some pairs never connect.
+   Default TURN: the Open Relay Project's public "static auth" service —
+   short-lived logins are made here from its published shared secret
+   (TURN REST API: username = expiry time, password = HMAC-SHA1).
+   Optional: paste your own free Metered credentials URL into TURN_API_URL
+   (https://<app>.metered.live/api/v1/turn/credentials?apiKey=...) for a
+   dedicated 20 GB/month relay.
+   --------------------------------------------------------------------- */
+const TURN_API_URL = '';
+const STUN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' },
+];
+let iceCache = null, iceCacheAt = 0;
+async function openRelayTurn() {
+  const username = `${Math.floor(Date.now() / 1000) + 12 * 3600}:neonasteroids`;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode('openrelayprojectsecret'), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(username)));
+  let bin = ''; for (const b of sig) bin += String.fromCharCode(b);
+  return {
+    urls: [
+      'turn:staticauth.openrelay.metered.ca:80', 'turn:staticauth.openrelay.metered.ca:80?transport=tcp',
+      'turn:staticauth.openrelay.metered.ca:443', 'turn:staticauth.openrelay.metered.ca:443?transport=tcp',
+    ],
+    username, credential: btoa(bin),
+  };
+}
+/** STUN + TURN, cached for an hour. Never takes more than ~3 s; falls back to STUN only. */
+async function iceServers() {
+  if (iceCache && Date.now() - iceCacheAt < 3600e3) return iceCache;
+  const turn = (async () => {
+    if (TURN_API_URL) {
+      try { const r = await fetch(TURN_API_URL); const list = await r.json(); if (Array.isArray(list) && list.length) return list; } catch (_) {}
+    }
+    try { return [await openRelayTurn()]; } catch (_) { return []; }
+  })();
+  const timeout = new Promise(res => setTimeout(() => res([]), 3000));
+  const extra = await Promise.race([turn, timeout]);
+  iceCache = [...STUN_SERVERS, ...extra]; iceCacheAt = Date.now();
+  return iceCache;
+}
+if (!inClaude()) iceServers();   // warm the cache at load
+
 
 function generateRoomCode() {
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1373,7 +1442,7 @@ function emitExhaust(x, y, vx, vy, angle, thrust, color) {
    ===================================================================== */
 let state = 'menu';                // 'menu' | 'play' | 'over'
 let mode = 'bot';                  // 'bot' | 'online' | 'practice'
-let paused = false, tickCount = 0, netAcc = 0, leaveTimer = 0, flashTimer = 0;
+let paused = false, tickCount = 0, netAcc = 0, leaveTimer = 0, flashTimer = 0, overTicks = 0;
 let net = new NullAdapter();
 let opp = null;                    // BotShip | RemotePlayer | null
 const remotes = new Map();
@@ -1442,7 +1511,7 @@ function startGame() {
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
   Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false, surrendered: false });
-  tickCount = 0; leaveTimer = 0; practiceTotal = 0; lastBeat = -1; lastPh = '';
+  tickCount = 0; leaveTimer = 0; overTicks = 0; practiceTotal = 0; lastBeat = -1; lastPh = '';
   joy.active = false; fire.held = false; ship.shots = 0;
   roomCode = '';
   if (mode === 'online') {
@@ -1815,9 +1884,11 @@ function update() {
     if (netAcc >= 1000 / CFG.NET_SEND_HZ) { netAcc = 0; net.publish(buildPresence()); }
     if (leaveTimer > 0 && --leaveTimer === 0 && !net.keepAlive) net.close();
   } else if (mode === 'online' && state === 'over' && net.keepAlive && !net.closed) {
-    // On the result screen: a light "still here, not playing" beat keeps the direct link warm for a rematch
+    // On the result screen: a light "still here, not playing" beat keeps the direct link warm for a rematch.
+    // After a minute with no rematch, close it so the next game starts from a clean connection.
     netAcc += CFG.TICK_MS;
     if (netAcc >= 1000) { netAcc = 0; net.publish({ v: 1, on: 0 }); }
+    if (++overTicks > 60 * 60) net.close();
   }
 
   // ---- Rocks (guests glide mirrored rocks toward the host's positions) ----
