@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-201113';
+const BUILD = '20260928-205456';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1310,14 +1310,15 @@ class TrysteroAdapter extends NetAdapter {
   async _join() {
     if (this.closed) return;
     const T = trysteroLib();
-    const ice = await iceServers();
+    const attempt = (this.joinAttempt || 0) + 1;
+    const rtc = await rtcFor(attempt);
     if (this.closed) return;
-    this.joinAttempt = (this.joinAttempt || 0) + 1;
-    this.diag.turn = ice.some(isTurn);
+    this.joinAttempt = attempt;
+    this.diag.turn = rtc.turn; this.diag.relay = rtc.relay;
     let room;
     try {
       room = T.joinRoom(
-        { appId: TRYSTERO_APP, rtcConfig: { iceServers: ice } },
+        { appId: TRYSTERO_APP, rtcConfig: rtc.rtcConfig },
         'room-' + this.code.toLowerCase(),
         { onJoinError: e => { this.diag.err = String((e && (e.error || e.message)) || 'join error').slice(0, 60); } },
       );
@@ -1354,7 +1355,8 @@ class TrysteroAdapter extends NetAdapter {
   /** Not linked in time? Throw the attempt away and start completely fresh. */
   _armWatchdog() {
     clearTimeout(this.watchT);
-    const ms = this.role === 'join' ? 25000 : 60000;
+    // Relay links take longer to set up (up to ~15 s just gathering routes on slow Wi-Fi)
+    const ms = this.role === 'join' ? (this.diag.relay ? 50000 : 35000) : 60000;
     this.watchT = setTimeout(() => { if (!this.closed && !this.partner) this._fresh(); }, ms);
   }
   /** Leave the current room entirely (relays + half-open links) and join again from scratch. */
@@ -1405,7 +1407,7 @@ class TrysteroAdapter extends NetAdapter {
   }
   report() {
     const d = this.diag || {};
-    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.partner ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.turn ? ' · RELAY READY' : '')
+    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.partner ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.relay ? ' · RELAY MODE' : d.turn ? ' · RELAY READY' : '')
       + (!this.partner && this.joinAttempt > 1 ? ` · ATTEMPT ${this.joinAttempt}` : '') + (d.err && !this.partner ? ` · ${d.err}` : '');
   }
   close() {
@@ -1440,12 +1442,13 @@ class QuickMatchAdapter extends TrysteroAdapter {
   async _enterPool() {
     if (this.closed || this.matched) return;
     const T = trysteroLib();
-    const ice = await iceServers();
+    this.poolAttempt = (this.poolAttempt || 0) + 1;
+    const rtc = await rtcFor(this.poolAttempt);
     if (this.closed || this.matched) return;
     this.myId = T.selfId || String(Math.random());
     if (!this.poolT0) this.poolT0 = Date.now();
     let lobby;
-    try { lobby = T.joinRoom({ appId: TRYSTERO_APP, rtcConfig: { iceServers: ice } }, QUICK_POOL); }
+    try { lobby = T.joinRoom({ appId: TRYSTERO_APP, rtcConfig: rtc.rtcConfig }, QUICK_POOL); }
     catch (e) { this.status = 'CONNECTION PROBLEM · ' + String(e && e.message || e).slice(0, 60); return; }
     this.lobby = lobby;
     const aSeek = lobby.makeAction('seek'), aProp = lobby.makeAction('prop'), aAcc = lobby.makeAction('acc'), aRej = lobby.makeAction('rej');
@@ -1553,7 +1556,7 @@ const inClaude = () => !!(window.claude && typeof window.claude.use === 'functio
    --------------------------------------------------------------------- */
 const TURN_API_URL = '';
 const STUN_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.relay.metered.ca:80' },   // two is enough; more slows setup
 ];
 /** The game's own backup relay (Metered, dead-baron's free account). Tried first when a
  *  direct link is blocked. UDP 80, TCP 80, UDP 443 and TLS 443 cover strict networks. */
@@ -1599,6 +1602,28 @@ async function iceServers() {
   return iceCache;
 }
 if (!inClaude()) iceServers();   // warm the cache at load
+
+/* Strict networks (symmetric NAT: many phones on office/school/some home Wi-Fi) can never
+   link directly — only through the relay. Trying direct routes first wastes the whole
+   attempt, so we check the network at load and go relay-only straight away when it's strict. */
+let strictNet = null;            // null = unknown, true = strict, false = normal
+const strictReady = (async () => {
+  if (inClaude() || typeof RTCPeerConnection === 'undefined') return;
+  await new Promise(r => setTimeout(r, 0));   // let iceGather (defined further down) exist
+  const g = await iceGather(STUN_SERVERS, 'all', 3500);
+  if (!g || !g.srflx.length) return;
+  const ports = new Set(g.srflx.map(c => c.port)), bases = new Set(g.srflx.map(c => c.raddr));
+  strictNet = ports.size > bases.size;
+})();
+/** WebRTC settings for one connection attempt. Relay-only on strict networks, and on every
+ *  second retry anywhere (covers networks the check can't spot). */
+async function rtcFor(attempt) {
+  await Promise.race([strictReady, new Promise(r => setTimeout(r, 4000))]);
+  const ice = await iceServers(), turn = ice.filter(isTurn);
+  const relay = turn.length > 0 && (strictNet === true || attempt % 2 === 0);
+  return { relay, turn: turn.length > 0,
+    rtcConfig: relay ? { iceServers: turn, iceTransportPolicy: 'relay' } : { iceServers: ice } };
+}
 
 
 function generateRoomCode() {
@@ -2579,7 +2604,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) chec
      4 Relays      public matchmaking relays accept a connection
      5 Direct      this network allows direct phone-to-phone links (STUN)
      6 Backup      the TURN backup relay works (needed on strict networks)
-     7 Network     strict-network check (symmetric NAT → needs the backup)
+     7 Relay link  a real test message travels through the backup relay and back
+     8 Network     strict-network check (symmetric NAT → needs the backup)
    --------------------------------------------------------------------- */
 const NT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.snort.social', 'wss://nostr.mom'];
 const ntEl = document.getElementById('netTest');
@@ -2588,7 +2614,7 @@ const ntVerdict = document.getElementById('ntVerdict');
 let ntRunning = false, ntReport = '';
 const NT_STEPS = [
   ['browser', 'Browser'], ['code', 'Online code'], ['internet', 'Internet'],
-  ['relays', 'Matchmaking relays'], ['direct', 'Direct links'], ['turn', 'Backup relay'], ['nat', 'Network type'],
+  ['relays', 'Matchmaking relays'], ['direct', 'Direct links'], ['turn', 'Backup relay'], ['rlink', 'Relay link'], ['nat', 'Network type'],
 ];
 const ntState = {};
 
@@ -2649,9 +2675,35 @@ async function iceGather(servers, policy, ms = 6000) {
   finally { try { pc && pc.close(); } catch (_) {} }
 }
 
+/** Two relay-only connections inside this page send a message to each other — the
+ *  same path a real game takes on a strict network, end to end. */
+async function relayLoopback(servers, ms) {
+  const t0 = performance.now();
+  let a, b, timer;
+  try {
+    const cfg = { iceServers: servers, iceTransportPolicy: 'relay' };
+    a = new RTCPeerConnection(cfg); b = new RTCPeerConnection(cfg);
+    a.onicecandidate = e => { if (e.candidate) b.addIceCandidate(e.candidate).catch(() => {}); };
+    b.onicecandidate = e => { if (e.candidate) a.addIceCandidate(e.candidate).catch(() => {}); };
+    const ch = a.createDataChannel('nt');
+    const got = new Promise((res, rej) => {
+      b.ondatachannel = e => { e.channel.onmessage = m => res(m.data); };
+      timer = setTimeout(() => rej(new Error(`no reply in ${ms / 1000}s · ${a.iceConnectionState}`)), ms);
+    });
+    ch.onopen = () => ch.send('ping');
+    await a.setLocalDescription(await a.createOffer());
+    await b.setRemoteDescription(a.localDescription);
+    await b.setLocalDescription(await b.createAnswer());
+    await a.setRemoteDescription(b.localDescription);
+    await got;
+    return { ok: true, ms: Math.round(performance.now() - t0) };
+  } catch (e) { return { ok: false, why: String(e && e.message || e).slice(0, 60) }; }
+  finally { clearTimeout(timer); try { a && a.close(); b && b.close(); } catch (_) {} }
+}
+
 async function runNetworkTest() {
   if (ntRunning) return;
-  ntRunning = true; ntBuildRows(); ntVerdict.className = 'nt-verdict'; ntVerdict.textContent = 'Running the test… this takes about 10 seconds.';
+  ntRunning = true; ntBuildRows(); ntVerdict.className = 'nt-verdict'; ntVerdict.textContent = 'Running the test… this takes about 15 seconds.';
   for (const [k] of NT_STEPS) ntSet(k, 'run');
 
   // 1 Browser
@@ -2662,7 +2714,7 @@ async function runNetworkTest() {
     // Inside Claude the game uses Claude's live channel instead of WebRTC
     const api = await roomApiPromise;
     ntSet('code', api ? 'ok' : 'fail', api ? 'Claude live channel available' : 'Not available in this viewer');
-    for (const k of ['internet', 'relays', 'direct', 'turn', 'nat']) ntSet(k, 'skip', 'Not used inside Claude');
+    for (const k of ['internet', 'relays', 'direct', 'turn', 'rlink', 'nat']) ntSet(k, 'skip', 'Not used inside Claude');
     return ntFinish();
   }
 
@@ -2693,14 +2745,18 @@ async function runNetworkTest() {
     // Symmetric NAT: the same local socket shows up with different public ports for different STUN servers
     const ports = new Set(g.srflx.map(c => c.port)), bases = new Set(g.srflx.map(c => c.raddr));
     if (!g.srflx.length) ntSet('nat', 'warn', 'Unknown (no public address seen)');
-    else if (ports.size > bases.size) ntSet('nat', 'warn', 'Strict network (symmetric NAT) — needs the backup relay');
-    else ntSet('nat', 'ok', 'Normal network');
+    else if (ports.size > bases.size) { strictNet = true; ntSet('nat', 'warn', 'Strict network (symmetric NAT) — games will use the backup relay'); }
+    else { strictNet = false; ntSet('nat', 'ok', 'Normal network'); }
   })();
   const turnT = (async () => {
     if (!hasRTC) { ntSet('turn', 'fail', 'Browser has no WebRTC'); return; }
     if (!turn.length) { ntSet('turn', 'warn', 'No backup relay configured'); return; }
     const g = await iceGather(turn, 'relay', 8000);
-    ntSet('turn', g && g.types.has('relay') ? 'ok' : 'fail', g && g.types.has('relay') ? 'Backup relay reachable' : 'Backup relay unreachable (blocked or busy)');
+    const ok = g && g.types.has('relay');
+    ntSet('turn', ok ? 'ok' : 'fail', ok ? 'Backup relay reachable' : 'Backup relay unreachable (blocked or busy)');
+    if (!ok) { ntSet('rlink', 'skip', 'Skipped (relay not reachable)'); return; }
+    const r = await relayLoopback(turn, 15000);
+    ntSet('rlink', r.ok ? 'ok' : 'fail', r.ok ? `Test message went through the relay in ${r.ms} ms` : `Relay answered but game data didn't get through (${r.why})`);
   })();
   await Promise.all([internet, relays, direct, turnT]);
   ntFinish();
@@ -2719,6 +2775,8 @@ function ntFinish() {
     verdict = 'This network blocks the matchmaking relays, so phones can\'t find each other. Switch between Wi-Fi and cellular, or turn off any VPN, ad blocker, Screen Time or school/work filter.'; cls = 'bad';
   } else if (st('direct') === 'ok' && st('nat') === 'ok') {
     verdict = 'GOOD TO CONNECT. Everything online play needs is working on this network.'; cls = 'good';
+  } else if (st('turn') === 'ok' && st('rlink') === 'fail') {
+    verdict = 'MAY NOT CONNECT. The backup relay answers but this network stops game data going through it. Use cellular data on this network, or try another Wi-Fi.'; cls = 'bad';
   } else if (st('turn') === 'ok') {
     verdict = 'SHOULD CONNECT. This network limits direct links, so games will use the backup relay (it may take a little longer to join).'; cls = 'ok';
   } else {
