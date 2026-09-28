@@ -201,7 +201,7 @@
   <div class="hint">
     <b>FLY</b> (left thumb): drag to steer. Push far to thrust.<br>
     <b>FIRE</b> (right thumb): tap to shoot. Hold for steady fire.<br>
-    Best of 3 · 30 s rounds · 3 hits and you're scrap.<br>
+    Best of 3 · 1-minute rounds · 3 hits and you're scrap.<br>
     Last ship flying or most points wins the round.
   </div>
 </div>
@@ -250,7 +250,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-161855';
+const BUILD = '20260928-163200';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -279,7 +279,7 @@ const CFG = {
   SHIP_R: 12,
   SHIP_HIT_R: 13,
 
-  ROUND_MS: 30000,
+  ROUND_MS: 60000,           // 1-minute rounds
   INTRO_MS: 3000,
   RESULT_MS: 3400,
   WINS_NEEDED: 2,
@@ -303,7 +303,7 @@ const CFG = {
 const TIERS = {
   1: { large: 3, medium: 0, ufos: [],                  tag: 'LIGHT FIELD' },
   2: { large: 5, medium: 3, ufos: [],                  tag: 'HEAVY FIELD' },
-  3: { large: 7, medium: 3, ufos: [3500, 11000, 19000], tag: 'UFOs INBOUND' },
+  3: { large: 7, medium: 3, ufos: [5000, 22000, 40000], tag: 'UFOs INBOUND' },
 };
 const tierFor = rn => TIERS[Math.min(Math.max(rn, 1), 3)];
 
@@ -977,7 +977,7 @@ class PeerAdapter extends NetAdapter {
   connect(code, role = 'host') {
     this.closed = false; this.role = role; this._setCode(code);
     this.conn = null; this.remoteId = null; this.lastHeard = 0; this.attempt = 0; this.fails = 0;
-    this.status = role === 'host' ? 'OPENING ROOM…' : 'LOOKING FOR THE HOST…';
+    this.status = role === 'host' ? 'OPENING ROOM…' : 'CONNECTING…';
     this.diag = { role: role === 'host' ? 'opening room' : 'joining', err: '' };
     this.isHost = role === 'host';
     this._whenLib(() => role === 'host' ? this._tryHost() : this._tryJoin());
@@ -1036,7 +1036,7 @@ class PeerAdapter extends NetAdapter {
     peer.on('error', e => {
       if (this.closed || peer !== this.peer) return;
       if (e.type === 'peer-unavailable') {               // nobody is hosting this code (yet)
-        this.status = `NO GAME WITH CODE ${this.code} YET · CHECK THE CODE · STILL LOOKING…`;
+        this.status = `STILL SEARCHING FOR ROOM ${this.code} · MAKE SURE THE CODE MATCHES AND THE HOST IS WAITING`;
         this._redial(3000);
       } else this._fail(e);
     });
@@ -1132,10 +1132,10 @@ const trysteroLib = () => (window.Trystero && typeof window.Trystero.joinRoom ==
 class TrysteroAdapter extends NetAdapter {
   constructor() { super(); this.keepAlive = true; }
   connect(code, role = 'host') {
-    this.closed = false; this.role = role; this.code = code;
+    this.closed = false; this.role = role; this.code = code; this.startedAt = performance.now();
     this.partner = null; this.hostPid = null; this.lastHeard = 0; this.attempt = 0;
     this.isHost = role === 'host';
-    this.status = role === 'host' ? 'OPENING ROOM…' : 'LOOKING FOR THE HOST…';
+    this.status = role === 'host' ? 'OPENING ROOM…' : 'CONNECTING…';
     this.diag = { role: role === 'host' ? 'opening room' : 'joining', err: '' };
     this._whenLib(() => this._join());
   }
@@ -1182,8 +1182,8 @@ class TrysteroAdapter extends NetAdapter {
     };
     clearTimeout(this.noHostT);
     if (this.role === 'join') this.noHostT = setTimeout(() => {
-      if (!this.partner && !this.closed) this.status = `NO GAME WITH CODE ${this.code} YET · CHECK THE CODE · STILL LOOKING…`;
-    }, 12000);
+      if (!this.partner && !this.closed) this.status = `STILL SEARCHING FOR ROOM ${this.code} · MAKE SURE THE CODE MATCHES AND THE HOST IS WAITING`;
+    }, 30000);
   }
   _onHi(d, pid) {
     if (!pid || !d || typeof d !== 'object') return;
@@ -1949,11 +1949,13 @@ function drawHUD() {
   // Round + clock (center)
   if (match.rn > 0) {
     glowText(mode === 'practice' ? `ROUND ${match.rn}/3` : `ROUND ${match.rn}`, W / 2, top + 26, '#9a8fd6', 11, 'center', 0);
-    const secs = match.ph === 'play' ? Math.ceil(match.t / 1000) : match.ph === 'intro' ? 30 : 0;
-    glowText(`0:${String(clamp(secs, 0, 30)).padStart(2, '0')}`, W / 2, top + 49, match.ph === 'play' && secs <= 5 ? '#ff2d4b' : '#ffffff', 22, 'center');
+    const full = Math.round(CFG.ROUND_MS / 1000);
+    const secs = clamp(match.ph === 'play' ? Math.ceil(match.t / 1000) : match.ph === 'intro' ? full : 0, 0, full);
+    glowText(`${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`, W / 2, top + 49, match.ph === 'play' && secs <= 10 ? '#ff2d4b' : '#ffffff', 22, 'center');
   }
   if (mode === 'online') {
-    const line = net.status ? (net.status === 'CONNECTING…' ? net.status : 'NOT ONLINE') : (opp ? `ROOM ${roomCode} · ${net.isHost ? 'HOST' : 'GUEST'}` : `ROOM ${roomCode}`);
+    const searching = !net.status || net.status === 'CONNECTING…' || net.status.startsWith('STILL SEARCHING') || net.status === 'OPENING ROOM…';
+    const line = net.status ? (searching ? 'CONNECTING…' : 'NOT ONLINE') : (opp ? `ROOM ${roomCode} · ${net.isHost ? 'HOST' : 'GUEST'}` : `ROOM ${roomCode}`);
     glowText(line, W / 2, top + 66, net.status ? '#ff9f1c' : '#8b80c4', 10, 'center', 0);
   }
 }
@@ -1968,7 +1970,13 @@ function drawBanners() {
     glowText(joining ? roomCode : `YOUR CODE ${roomCode}`, W / 2, cy + 30, ship.color, joining ? 22 : 16, 'center');
     glowText('Warm up: nothing counts yet', W / 2, cy + 54, '#8b80c4', 11, 'center', 0);
     let yy = cy + 80;
-    if (net.status && net.status !== 'CONNECTING…') { wrapText(net.status, W / 2, yy, W - 40, 16, '#ff2d4b', 12); yy += 40; }
+    if (net.role === 'join' && !(net.linked && net.linked()) && (net.status === 'CONNECTING…' || !net.status)) {
+      const secs = Math.floor((performance.now() - (net.startedAt || performance.now())) / 1000);
+      wrapText(`FINDING THE HOST… ${secs}s · USUALLY 5–20s`, W / 2, yy, W - 40, 16, '#9a8fd6', 12); yy += 24;
+    } else if (net.status && net.status !== 'CONNECTING…' && net.status !== 'OPENING ROOM…') {
+      const soft = net.status.startsWith('STILL SEARCHING');
+      wrapText(net.status, W / 2, yy, W - 40, 16, soft ? '#ff9f1c' : '#ff2d4b', 12); yy += 40;
+    }
     if (net.report) wrapText(net.report().toUpperCase(), W / 2, yy, W - 40, 13, '#8b80c4', 10);
   } else if (match.ph === 'intro') {
     glowText(`ROUND ${match.rn}`, W / 2, cy, '#ffffff', 34, 'center');
