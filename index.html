@@ -132,6 +132,15 @@
   #pauseBtn.hidden, #waitShare.hidden { display: none; }
   #waitShare { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
   #pauseMenu { background: rgba(5,1,15,.86); }
+  #updateBtn {
+    position: fixed; z-index: 20; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 8px); white-space: nowrap;
+    font: inherit; font-weight: bold; font-size: 12px; letter-spacing: 2px;
+    color: #05010f; background: #ffe600; border: 0; border-radius: 16px; padding: 9px 16px;
+    box-shadow: 0 0 16px #ffe600; cursor: pointer;
+  }
+  #updateBtn.hidden { display: none; }
+  #buildTag { font-size: 10px; opacity: .6; }
 
   #rotate { display: none; }
   @media (orientation: landscape) and (max-height: 520px) {
@@ -187,6 +196,7 @@
 
   <button class="btn go" id="startBtn">LAUNCH</button>
   <button class="btn small" id="soundBtn">SOUND: ON</button>
+  <div class="note" id="buildTag"></div>
 
   <div class="hint">
     <b>FLY</b> (left thumb): drag to steer. Push far to thrust.<br>
@@ -195,6 +205,8 @@
     Last ship flying or most points wins the round.
   </div>
 </div>
+
+<button id="updateBtn" class="hidden">NEW VERSION READY · TAP TO UPDATE</button>
 
 <!-- ================= IN-GAME MENU ================= -->
 <button id="pauseBtn" class="hidden" aria-label="Game menu">☰ MENU</button>
@@ -236,6 +248,9 @@
         onerror="var s=document.createElement('script');s.src='https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js';document.head.appendChild(s);"></script>
 <script>
 'use strict';
+
+/** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
+const BUILD = '20260928-161855';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2123,6 +2138,32 @@ if (inClaude()) roomApiPromise.then(api => {
   api.onPeers(show, fail);
   api.onConnection(show, fail);
 });
+
+/* ---------- Stale-copy check (open web only) ----------
+   Phones can keep an old saved copy of the page for a while. Compare this
+   copy's BUILD with the live one; if they differ, offer a one-tap update.
+   (An old and a new copy may not be able to find each other online.) */
+const updateBtn = document.getElementById('updateBtn');
+document.getElementById('buildTag').textContent = 'BUILD ' + BUILD;
+let newBuild = null;
+function checkForUpdate() {
+  if (inClaude() || BUILD === 'dev' || newBuild) return;
+  fetch(location.pathname + '?build-check=' + Date.now(), { cache: 'no-store' })
+    .then(r => r.ok ? r.text() : '')
+    .then(t => {
+      const m = t.match(/const BUILD = '([^']+)'/);
+      if (m && m[1] !== BUILD) { newBuild = m[1]; updateBtn.classList.remove('hidden'); }
+    }).catch(() => {});
+}
+updateBtn.addEventListener('click', () => {
+  const q = new URLSearchParams(location.search);
+  q.set('v', newBuild || Date.now());
+  if (state === 'play' && mode === 'online' && roomCode) q.set('room', roomCode);
+  location.replace(location.pathname + '?' + q.toString());
+});
+checkForUpdate();
+setInterval(() => { if (state !== 'play') checkForUpdate(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
 
 /* ---------- Sound toggle ---------- */
 for (const id of ['soundBtn', 'soundBtn2']) document.getElementById(id).addEventListener('click', () => setSound(!Sound.on));
