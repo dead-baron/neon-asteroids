@@ -68,10 +68,10 @@
   h1 small { display: block; font-size: .36em; letter-spacing: 9px; margin-top: 10px; color: #ff3f8e; text-shadow: 0 0 8px #ff3f8e; }
   .label { font-size: 12px; letter-spacing: 3px; color: #9a8fd6; margin-bottom: -6px; }
 
-  /* Color grid: 12 neon hulls, 6 per row */
-  .dots { display: grid; grid-template-columns: repeat(6, 40px); gap: 12px 14px; }
+  /* Color grid: 16 neon hulls, 8 per row (two rows keep the menu short on phones) */
+  .dots { display: grid; grid-template-columns: repeat(8, 32px); gap: 14px 10px; }
   .dot {
-    width: 40px; height: 40px; border-radius: 50%;
+    width: 32px; height: 32px; border-radius: 50%;
     border: 3px solid transparent; padding: 0; cursor: pointer;
     background: var(--c); box-shadow: 0 0 8px var(--c), 0 0 18px var(--c);
     transition: transform .12s, border-color .12s;
@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-220219';
+const BUILD = '20260928-221508';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -352,19 +352,15 @@ const TIERS = {
 };
 const tierFor = rn => TIERS[Math.min(Math.max(rn, 1), 3)];
 
-const SHIP_COLORS = [
-  ['pink',    '#ff3f8e', 'NEON PINK'],
-  ['cyan',    '#00f0ff', 'CYAN'],
-  ['yellow',  '#ffe600', 'YELLOW'],
-  ['magenta', '#e100ff', 'MAGENTA'],
-  ['lime',    '#7dff3a', 'ACID LIME'],
-  ['orange',  '#ff8a1c', 'BLAZE ORANGE'],
-  ['red',     '#ff2d4b', 'LASER RED'],
-  ['blue',    '#2f7dff', 'ELECTRIC BLUE'],
-  ['mint',    '#3dffc5', 'MINT'],
-  ['violet',  '#9d6bff', 'ULTRAVIOLET'],
-  ['gold',    '#ffc93d', 'GOLD'],
-  ['white',   '#e9f3ff', 'ICE WHITE'],
+const SHIP_COLORS = [          // 16 hues spread evenly round the wheel, so no two hulls look alike
+  ['pink',    '#FF3D91', 'HOT PINK'],     ['red',     '#FF3555', 'SIGNAL RED'],
+  ['orange',  '#FF6536', 'LAVA ORANGE'],  ['amber',   '#FFAA2B', 'ELECTRIC AMBER'],
+  ['yellow',  '#FFE94A', 'SOLAR YELLOW'], ['lime',    '#C9F43A', 'ACID LIME'],
+  ['green',   '#5CF56A', 'LASER GREEN'],  ['mint',    '#6BF0BB', 'MINT'],
+  ['teal',    '#00BDAF', 'TEAL'],         ['cyan',    '#1DE9FF', 'ELECTRIC CYAN'],
+  ['sky',     '#4AA9FF', 'SKY BLUE'],     ['cobalt',  '#4776FF', 'COBALT'],
+  ['indigo',  '#725BFF', 'INDIGO'],       ['violet',  '#AA5CFF', 'ULTRAVIOLET'],
+  ['magenta', '#F04BEB', 'MAGENTA'],      ['white',   '#EAF6FF', 'ICE WHITE'],
 ];
 const AST_COLORS = [null, '#b388ff', '#ff9f1c', '#39ff14'];
 const AST_RADIUS = [0, 14, 27, 44];
@@ -2919,7 +2915,7 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 150));
 resize();
 Particles.init();
-selectColor('pink');
+selectColor(SHIP_COLORS[Math.floor(Math.random() * SHIP_COLORS.length)][0]);   // random hull each visit; tap to change
 seedAmbient();
 requestAnimationFrame(frame);
 </script>
