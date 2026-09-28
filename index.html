@@ -294,7 +294,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-205456';
+const BUILD = '20260928-210107';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -347,8 +347,8 @@ const CFG = {
 /** Round tiers. Round 4+ (after draws) reuses tier 3. */
 const TIERS = {
   1: { large: 3, medium: 0, ufos: [],                  tag: 'LIGHT FIELD' },
-  2: { large: 5, medium: 3, ufos: [],                  tag: 'HEAVY FIELD' },
-  3: { large: 7, medium: 3, ufos: [5000, 22000, 40000], tag: 'UFOs INBOUND' },
+  2: { large: 4, medium: 0, ufos: [],                  tag: 'DENSER FIELD' },
+  3: { large: 4, medium: 1, ufos: [5000, 22000, 40000], tag: 'UFOs INBOUND' },
 };
 const tierFor = rn => TIERS[Math.min(Math.max(rn, 1), 3)];
 
@@ -2395,16 +2395,26 @@ function drawBanners() {
   }
 }
 
-let last = performance.now(), acc = 0, fpsAvg = 60;
+/* High-refresh screens (Pixel 7 Pro and others at 120 Hz) call us twice per 60 Hz game tick.
+   Drawing every call doubles the glow work for identical pictures and makes ticks land
+   unevenly (0,1,0,2,…), which reads as stutter. So we measure the screen's refresh rate and
+   draw on every Nth refresh — steady 60 fps on 120 Hz, native on 60/90 Hz — and let the tick
+   clock run a few ms early/late so each drawn frame gets exactly one tick. */
+let last = performance.now(), acc = 0, fpsAvg = 60, vsync = 1000 / 60, vsyncN = 0, lastDraw = last;
 function frame(t) {
   requestAnimationFrame(frame);
-  let dt = t - last; last = t;
+  const raw = t - last; last = t;
+  if (raw > 0 && raw < 50) vsync = vsync * 0.9 + raw * 0.1;
+  const every = Math.max(1, Math.floor(CFG.TICK_MS / vsync + 0.25));
+  if (++vsyncN % every) return;                     // skip this refresh: nothing new to show
+  let dt = t - lastDraw; lastDraw = t;
   if (dt > 250) dt = 250;
   if (dt > 0) fpsAvg = fpsAvg * 0.95 + (1000 / dt) * 0.05;
   Particles.quality = fpsAvg < 40 ? 0.4 : fpsAvg < 52 ? 0.7 : 1;
   if (!paused && !(menuOpen && mode !== 'online')) {
     acc += dt; let steps = 0;
-    while (acc >= CFG.TICK_MS && steps < 8) { update(); acc -= CFG.TICK_MS; steps++; }
+    const slack = CFG.TICK_MS * 0.25;               // absorb frame-timing jitter
+    while (acc >= CFG.TICK_MS - slack && steps < 8) { update(); acc -= CFG.TICK_MS; steps++; }
     if (steps === 8) acc = 0;
   }
   render();
@@ -2412,7 +2422,7 @@ function frame(t) {
 }
 document.addEventListener('visibilitychange', () => {
   paused = document.hidden && mode !== 'online';     // online keeps running so the duel stays in sync
-  if (!document.hidden) { last = performance.now(); acc = 0; }
+  if (!document.hidden) { last = lastDraw = performance.now(); acc = 0; }
   else { joy.active = false; fire.held = false; }
 });
 
