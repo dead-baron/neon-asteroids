@@ -219,6 +219,17 @@
 
 <div id="rotate" class="overlay">ROTATE TO PORTRAIT ⟲</div>
 
+<!-- Trystero (Nostr relays): the main matchmaker for direct phone-to-phone links on the open web.
+     Loaded as an ES module; a second CDN is tried if the first fails. -->
+<script type="module">
+  const sources = ['https://cdn.jsdelivr.net/npm/trystero@0.25.4/nostr/+esm', 'https://esm.run/trystero@0.25.4'];
+  (async () => {
+    for (const url of sources) {
+      try { const m = await import(url); if (m && m.joinRoom) { window.Trystero = m; return; } } catch (e) { window.TrysteroError = String(e); }
+    }
+    window.TrysteroFailed = true;
+  })();
+</script>
 <!-- PeerJS: direct phone-to-phone links (used when the page is hosted on the open web,
      e.g. GitHub Pages). Falls back to a second CDN if the first is blocked. -->
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"
@@ -1089,6 +1100,131 @@ class PeerAdapter extends NetAdapter {
   }
 }
 
+/* ---------------------------------------------------------------------
+   TrysteroAdapter — direct phone-to-phone play over WebRTC, introduced
+   through Trystero's Nostr strategy: several public relays are used at
+   once, so one slow or dead relay doesn't stop a match. No accounts,
+   no server of our own. (PeerJS stays as a fallback below.)
+
+   Room code → Trystero room "room-<code>". Everyone in the room says
+   hello with their role. The host accepts the first joiner and turns
+   away anyone else; the joiner links once the host says ok. After that
+   both sides stream the same presence object as every other transport.
+   --------------------------------------------------------------------- */
+const TRYSTERO_APP = 'neon-asteroids-duel-v1';
+const trysteroLib = () => (window.Trystero && typeof window.Trystero.joinRoom === 'function') ? window.Trystero : null;
+
+class TrysteroAdapter extends NetAdapter {
+  constructor() { super(); this.keepAlive = true; }
+  connect(code, role = 'host') {
+    this.closed = false; this.role = role; this.code = code;
+    this.partner = null; this.hostPid = null; this.lastHeard = 0; this.attempt = 0;
+    this.isHost = role === 'host';
+    this.status = role === 'host' ? 'OPENING ROOM…' : 'LOOKING FOR THE HOST…';
+    this.diag = { role: role === 'host' ? 'opening room' : 'joining', err: '' };
+    this._whenLib(() => this._join());
+  }
+  _whenLib(fn) {
+    if (this.closed) return;
+    if (trysteroLib()) { fn(); return; }
+    if (++this.attempt > 30) { this.status = 'COULD NOT LOAD THE MULTIPLAYER LIBRARY · CHECK YOUR CONNECTION'; return; }
+    setTimeout(() => this._whenLib(fn), 500);
+  }
+  linked() { return !!this.partner; }
+  _join() {
+    if (this.closed) return;
+    const T = trysteroLib();
+    let room;
+    try {
+      room = T.joinRoom(
+        { appId: TRYSTERO_APP, rtcConfig: { iceServers: peerOptions().config.iceServers } },
+        'room-' + this.code.toLowerCase(),
+        { onJoinError: e => { this.diag.err = String((e && (e.error || e.message)) || 'join error').slice(0, 60); } },
+      );
+    } catch (e) { this.status = 'CONNECTION PROBLEM · ' + String(e && e.message || e).slice(0, 60); return; }
+    this.room = room; this.myId = T.selfId || 'me';
+    if (this.role === 'host') { this.connected = true; this.status = ''; this.diag.role = 'host'; }
+
+    this.aHi = room.makeAction('hi');
+    this.aOk = room.makeAction('ok');
+    this.aFull = room.makeAction('full');
+    this.aP = room.makeAction('p');
+    const send = (a, data, pid) => { try { a.send(data, { target: pid }).catch(() => {}); } catch (_) {} };
+    this._send = send;
+
+    this.aHi.onMessage = (d, ctx) => this._onHi(d, ctx && ctx.peerId);
+    this.aOk.onMessage = (d, ctx) => { if (this.role === 'join' && !this.partner && ctx && ctx.peerId === this.hostPid) this._link(ctx.peerId); };
+    this.aFull.onMessage = (d, ctx) => { if (this.role === 'join' && !this.partner) this.emit('full', {}); };
+    this.aP.onMessage = (d, ctx) => {
+      if (!ctx || ctx.peerId !== this.partner) return;
+      this.lastHeard = performance.now();
+      if (this._ingest(this.partner, d) && !this.isHost) this._hostSnapshot(d);
+    };
+    room.onPeerJoin = pid => send(this.aHi, { v: 1, role: this.role }, pid);
+    room.onPeerLeave = pid => {
+      if (pid === this.partner) this._lost();
+      else if (pid === this.hostPid) this.hostPid = null;
+    };
+    clearTimeout(this.noHostT);
+    if (this.role === 'join') this.noHostT = setTimeout(() => {
+      if (!this.partner && !this.closed) this.status = `NO GAME WITH CODE ${this.code} YET · CHECK THE CODE · STILL LOOKING…`;
+    }, 12000);
+  }
+  _onHi(d, pid) {
+    if (!pid || !d || typeof d !== 'object') return;
+    if (this.role === 'host') {
+      if (d.role === 'join') {
+        if (!this.partner || this.partner === pid) { this._send(this.aOk, { v: 1 }, pid); if (!this.partner) this._link(pid); }
+        else this._send(this.aFull, { v: 1 }, pid);        // duels are 1v1
+      } else if (d.role === 'host' && !this.partner && this.myId > pid) {
+        this._rehost();                                      // two hosts on one code: the other keeps it
+      }
+    } else if (d.role === 'host') {
+      this.hostPid = pid;
+      this._send(this.aHi, { v: 1, role: 'join' }, pid);     // make sure the host has our hello
+    }
+  }
+  _link(pid) {
+    this.partner = pid; this.lastHeard = performance.now();
+    this.connected = true; this.status = ''; this.diag.role = this.isHost ? 'host' : 'guest'; this.diag.err = '';
+    clearTimeout(this.noHostT);
+  }
+  _lost() {
+    const id = this.partner; this.partner = null;
+    this.lastShots.delete(id); this.emit('leave', { id, bye: true });
+    if (this.role === 'join' && !this.closed) this.status = 'HOST LEFT · WAITING FOR THEM TO COME BACK…';
+  }
+  _rehost() {
+    try { this.room && this.room.leave(); } catch (_) {}
+    this.code = generateRoomCode();
+    this.emit('code', { code: this.code });
+    setTimeout(() => this._join(), 300);
+  }
+  publish(obj) {
+    if (!this.partner || this.closed || !this.aP) return;
+    if (performance.now() - this.lastHeard > 6000) { this._lost(); return; }   // rival went silent
+    this._send(this.aP, obj, this.partner);
+  }
+  report() {
+    const d = this.diag || {};
+    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.partner ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.err && !this.partner ? ` · ${d.err}` : '');
+  }
+  close() {
+    super.close(); this.closed = true; clearTimeout(this.noHostT);
+    if (this.partner && this.aP) this._send(this.aP, { v: 1, on: 0, bye: 1 }, this.partner);
+    const room = this.room; this.partner = null;
+    setTimeout(() => { try { room && room.leave(); } catch (_) {} }, 200);
+  }
+}
+
+/** Open-web transport: Trystero (many relays); PeerJS if Trystero can't load or `?net=peerjs`. */
+function webAdapter() {
+  const forced = new URLSearchParams(location.search).get('net');
+  if (forced === 'peerjs') return new PeerAdapter();
+  if (!trysteroLib() && window.TrysteroFailed && PeerCtor()) return new PeerAdapter();
+  return new TrysteroAdapter();
+}
+
 /** Direct links when on the open web; Claude's live channel inside Claude. */
 const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
 
@@ -1302,7 +1438,7 @@ function startGame() {
       resetShipForRound();
       spawnTier(TIERS[1]);
     } else {
-      net = inClaude() ? new RoomAdapter() : new PeerAdapter(); wireNetHandlers(net);
+      net = inClaude() ? new RoomAdapter() : webAdapter(); wireNetHandlers(net);
       awaitingFirstSnap = true; wasHost = true;
       resetShipForRound();
       spawnTier(TIERS[1]);                          // warm-up field while waiting
@@ -1964,8 +2100,8 @@ if (!inClaude()) {
   waitShare.addEventListener('click', () => { Sound.play('click'); shareInvite(roomCode, null); waitShare.textContent = 'LINK READY · SEND IT'; });
   let tries = 0;
   const checkLib = () => {
-    if (PeerCtor()) { liveNote.textContent = 'DIRECT LINK: READY'; liveNote.classList.remove('warn'); return; }
-    if (++tries > 20) { liveNote.textContent = 'DIRECT LINK: LIBRARY BLOCKED · CHECK YOUR CONNECTION'; liveNote.classList.add('warn'); return; }
+    if (trysteroLib() || (window.TrysteroFailed && PeerCtor())) { liveNote.textContent = 'DIRECT LINK: READY'; liveNote.classList.remove('warn'); return; }
+    if (++tries > 30) { liveNote.textContent = 'DIRECT LINK: LIBRARY BLOCKED · CHECK YOUR CONNECTION'; liveNote.classList.add('warn'); return; }
     liveNote.textContent = 'DIRECT LINK: LOADING…'; setTimeout(checkLib, 500);
   };
   checkLib();

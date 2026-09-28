@@ -9,7 +9,9 @@ Best of 3 rounds, 30 seconds each; 3 hits and your ship is scrap. Round 3 brings
 - **VS BOT**: a computer rival.
 - **ONLINE → HOST**: you get a 4-letter room code. Tap *Share invite link* (on the menu or the waiting screen) and send it.
 - **ONLINE → JOIN**: type your friend's code, or just open their invite link.
-  Phones connect directly (WebRTC via [PeerJS](https://peerjs.com)); the free PeerJS cloud server only introduces them.
+  Phones connect directly over WebRTC. [Trystero](https://github.com/dmotz/trystero) introduces them through
+  several public Nostr relays at once, so one busy relay doesn't block a match. [PeerJS](https://peerjs.com)
+  is the fallback if Trystero can't load (force it with `?net=peerjs`).
 - **PRACTICE**: three rounds solo for a high score.
 
 ## Controls
@@ -20,6 +22,7 @@ Best of 3 rounds, 30 seconds each; 3 hits and your ship is scrap. Round 3 brings
 
 ## Notes
 - Everything is in `index.html` (vanilla JS + Canvas, no build step).
-- Rooms are 1v1. Room codes map to PeerJS ids `neon-asteroids-duel-v1-<code>`.
+- Rooms are 1v1. Room codes map to Trystero room `room-<code>` (app id `neon-asteroids-duel-v1`),
+  or PeerJS id `neon-asteroids-duel-v1-<code>` on the fallback.
 - If a network blocks direct connections (some strict mobile or office networks), add a TURN server to `peerOptions()`.
 - To use your own PeerJS server, add `?peerhost=your.host:443` to the URL.
