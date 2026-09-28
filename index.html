@@ -771,69 +771,92 @@ function peerOptions() {
 }
 
 class PeerAdapter extends NetAdapter {
+  constructor() {
+    super();
+    this.keepAlive = true;      // the phone-to-phone link survives between matches, so rematches skip matchmaking
+  }
   connect(code) {
     this.closed = false; this.code = code; this.hostId = PEER_PREFIX + code.toLowerCase();
-    this.conn = null; this.remoteId = null; this.lastHeard = 0; this.attempt = 0;
+    this.conn = null; this.remoteId = null; this.lastHeard = 0; this.attempt = 0; this.fails = 0;
     this.status = 'CONNECTING…'; this.diag = { role: 'starting', err: '' };
     this._tryHost();
   }
+  /** True while the direct link to the rival is up. Matchmaking trouble doesn't matter then. */
+  linked() { return !!(this.conn && this.conn.open); }
+
+  _newPeer(id) {
+    const P = PeerCtor();
+    const peer = new P(id, peerOptions()); this.peer = peer;
+    // Losing the matchmaking server is harmless once linked: quietly reconnect in the background.
+    peer.on('disconnected', () => {
+      if (this.closed || peer !== this.peer) return;
+      setTimeout(() => { try { if (!peer.destroyed && peer.disconnected) peer.reconnect(); } catch (_) {} }, this.linked() ? 5000 : 1500);
+    });
+    return peer;
+  }
   _tryHost() {
     if (this.closed) return;
-    const P = PeerCtor();
-    if (!P) {                                             // library still loading (or blocked)
+    if (!PeerCtor()) {                                    // library still loading (or blocked)
       if (++this.attempt > 20) { this.status = 'COULD NOT LOAD THE MULTIPLAYER LIBRARY · CHECK YOUR CONNECTION'; return; }
       setTimeout(() => this._tryHost(), 500); return;
     }
     this.diag.role = 'claiming room';
-    const peer = new P(this.hostId, peerOptions()); this.peer = peer;
+    const peer = this._newPeer(this.hostId);
     peer.on('open', () => {
-      if (this.closed) { peer.destroy(); return; }
-      this.isHost = true; this.myId = peer.id; this.connected = true; this.status = ''; this.diag.role = 'host'; this.diag.err = '';
+      if (this.closed || peer !== this.peer) { peer.destroy(); return; }
+      this.isHost = true; this.myId = peer.id; this.connected = true; this.fails = 0;
+      this.status = ''; this.diag.role = 'host'; this.diag.err = '';
     });
     peer.on('connection', c => this._onIncoming(c));
-    peer.on('disconnected', () => { if (!this.closed && !peer.destroyed) { try { peer.reconnect(); } catch (_) {} } });
     peer.on('error', e => {
-      if (this.closed) return;
-      if (e.type === 'unavailable-id') { peer.destroy(); this._tryJoin(); }   // someone is hosting: join them
+      if (this.closed || peer !== this.peer) return;
+      if (e.type === 'unavailable-id') { peer.destroy(); this._tryJoin(); }  // someone is hosting: join them
       else if (e.type !== 'peer-unavailable') this._fail(e);
     });
   }
   _tryJoin() {
     if (this.closed) return;
-    const P = PeerCtor();
     this.diag.role = 'joining'; this.isHost = false;
-    const peer = new P(undefined, peerOptions()); this.peer = peer;
+    const peer = this._newPeer(undefined);
     peer.on('open', id => {
-      if (this.closed) { peer.destroy(); return; }
-      this.myId = id;
+      if (this.closed || peer !== this.peer) { peer.destroy(); return; }
+      this.myId = id; this.fails = 0;
       const c = peer.connect(this.hostId, { reliable: false, serialization: 'json' });
-      const timer = setTimeout(() => { if (!this.conn && !this.closed) { this.diag.err = 'host not answering'; peer.destroy(); this._retry(); } }, 8000);
+      const timer = setTimeout(() => { if (!this.linked() && !this.closed && peer === this.peer) { this.diag.err = 'host not answering'; peer.destroy(); this._retry(); } }, 8000);
       c.on('open', () => { clearTimeout(timer); if (this.closed) return; this._attach(c); this.connected = true; this.status = ''; this.diag.role = 'guest'; this.diag.err = ''; });
     });
     peer.on('error', e => {
-      if (this.closed) return;
-      if (e.type === 'peer-unavailable') { peer.destroy(); this._retry(); }  // host id just freed: try hosting again
+      if (this.closed || peer !== this.peer) return;
+      if (e.type === 'peer-unavailable') { peer.destroy(); this._retry(); }  // host id just freed: try hosting
       else this._fail(e);
     });
   }
+  /** Wait a little longer after each failure so a busy matchmaking server isn't hammered. */
+  _backoff() { return Math.min(15000, 1500 * Math.pow(2, this.fails)) + Math.random() * 800; }
   _retry() { if (this.closed) return; this.status = 'CONNECTING…'; setTimeout(() => this._tryHost(), 1200 + Math.random() * 800); }
   _fail(e) {
-    this.diag.err = e.type || 'error'; this.connected = false;
+    this.diag.err = e.type || 'error';
+    if (e.type === 'browser-incompatible') { this.status = 'THIS BROWSER CAN\'T DO DIRECT LINKS · TRY CHROME OR SAFARI'; return; }
+    if (this.linked()) return;                            // game link still up: ignore matchmaking trouble
+    this.connected = false; this.fails++;
+    const wait = this._backoff();
     this.status = ['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)
-      ? 'CAN\'T REACH THE MATCHMAKING SERVER · RETRYING…' : e.type === 'browser-incompatible'
-      ? 'THIS BROWSER CAN\'T DO DIRECT LINKS · TRY CHROME OR SAFARI' : `CONNECTION PROBLEM (${e.type || 'error'}) · RETRYING…`;
-    if (e.type === 'browser-incompatible') return;
-    setTimeout(() => { if (!this.closed) { try { this.peer && this.peer.destroy(); } catch (_) {} this._tryHost(); } }, 3000);
+      ? `MATCHMAKING SERVER BUSY · RETRYING IN ${Math.ceil(wait / 1000)}s` : `CONNECTION PROBLEM (${e.type || 'error'}) · RETRYING`;
+    setTimeout(() => {
+      if (this.closed || this.linked()) return;
+      try { this.peer && this.peer.destroy(); } catch (_) {}
+      this._tryHost();
+    }, wait);
   }
   _onIncoming(c) {
-    if (this.conn && this.conn.open) {                     // duels are 1v1
+    if (this.linked()) {                                  // duels are 1v1
       c.on('open', () => { try { c.send({ full: 1 }); } catch (_) {} setTimeout(() => c.close(), 400); });
       return;
     }
     c.on('open', () => this._attach(c));
   }
   _attach(c) {
-    this.conn = c; this.remoteId = c.peer; this.lastHeard = performance.now();
+    this.conn = c; this.remoteId = c.peer; this.lastHeard = performance.now(); this.status = '';
     c.on('data', d => {
       if (c !== this.conn) return;
       this.lastHeard = performance.now();
@@ -852,16 +875,17 @@ class PeerAdapter extends NetAdapter {
   publish(obj) {
     const c = this.conn;
     if (!c || !c.open || this.closed) return;
-    if (performance.now() - this.lastHeard > 5000) { try { c.close(); } catch (_) {} this._lost(c); return; }  // rival went silent
+    if (performance.now() - this.lastHeard > 6000) { try { c.close(); } catch (_) {} this._lost(c); return; }  // rival went silent
     try { c.send(obj); } catch (_) {}
   }
   report() {
     const d = this.diag || {};
-    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.conn ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + (d.err ? ` · ${d.err}` : '');
+    const sig = this.peer && this.peer.disconnected && this.linked() ? ' · MATCHMAKING OFFLINE (GAME UNAFFECTED)' : '';
+    return `DIRECT LINK · ${d.role.toUpperCase()} · ${this.linked() ? 'RIVAL LINKED' : 'NO RIVAL YET'}` + sig + (d.err && !this.linked() ? ` · ${d.err}` : '');
   }
   close() {
     super.close(); this.closed = true;
-    if (this.conn) { try { this.conn.send({ v: 1, on: 0 }); } catch (_) {} }
+    if (this.conn) { try { this.conn.send({ v: 1, on: 0, bye: 1 }); } catch (_) {} }
     const p = this.peer, c = this.conn;
     this.conn = null;
     setTimeout(() => { try { c && c.close(); } catch (_) {} try { p && p.destroy(); } catch (_) {} }, 150);
@@ -1057,7 +1081,10 @@ function updateUfosAuthority() {
 }
 
 function startGame() {
-  net.close();
+  // Rematch on a live direct link: keep it (no trip back through matchmaking)
+  const code = sanitizeCode(codeInput.value);
+  const reuse = mode === 'online' && net.keepAlive && !net.closed && net.code === code;
+  if (!reuse) net.close();
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
   Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false });
@@ -1065,13 +1092,19 @@ function startGame() {
   joy.active = false; fire.held = false; ship.shots = 0;
   roomCode = '';
   if (mode === 'online') {
-    roomCode = sanitizeCode(codeInput.value) || generateRoomCode();
+    roomCode = code || generateRoomCode();
     codeInput.value = roomCode;
-    net = inClaude() ? new RoomAdapter() : new PeerAdapter(); wireNetHandlers(net);
-    awaitingFirstSnap = true; wasHost = true;
-    resetShipForRound();
-    spawnTier(TIERS[1]);                            // warm-up field while waiting
-    net.connect(roomCode);
+    if (reuse) {
+      wasHost = net.isHost; awaitingFirstSnap = !net.isHost;
+      resetShipForRound();
+      spawnTier(TIERS[1]);
+    } else {
+      net = inClaude() ? new RoomAdapter() : new PeerAdapter(); wireNetHandlers(net);
+      awaitingFirstSnap = true; wasHost = true;
+      resetShipForRound();
+      spawnTier(TIERS[1]);                          // warm-up field while waiting
+      net.connect(roomCode);
+    }
   } else {
     net = new NullAdapter();
     if (mode === 'bot') {
@@ -1374,7 +1407,11 @@ function update() {
   if (mode === 'online' && (playing || leaveTimer > 0)) {
     netAcc += CFG.TICK_MS;
     if (netAcc >= 1000 / CFG.NET_SEND_HZ) { netAcc = 0; net.publish(buildPresence()); }
-    if (leaveTimer > 0 && --leaveTimer === 0) net.close();
+    if (leaveTimer > 0 && --leaveTimer === 0 && !net.keepAlive) net.close();
+  } else if (mode === 'online' && state === 'over' && net.keepAlive && !net.closed) {
+    // On the result screen: a light "still here, not playing" beat keeps the direct link warm for a rematch
+    netAcc += CFG.TICK_MS;
+    if (netAcc >= 1000) { netAcc = 0; net.publish({ v: 1, on: 0 }); }
   }
 
   // ---- Rocks (guests glide mirrored rocks toward the host's positions) ----
