@@ -311,7 +311,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-134149';
+const BUILD = '20260929-143749';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2607,6 +2607,7 @@ function selectColor(key) {
   label.textContent = name; label.style.setProperty('--c', hex);
   startBtn.style.setProperty('--accent', hex);
   document.getElementById('againBtn').style.setProperty('--accent', hex);
+  document.getElementById('quickBtn').style.setProperty('--accent', hex);
 }
 /* ONLINE / PRACTICE open their section; tapping the open one again closes it. */
 document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => {
