@@ -144,6 +144,14 @@
     background: rgba(5, 2, 15, .6); border: 1.5px solid var(--line); border-radius: 999px; padding: 6px 12px;
   }
   #waitBot:active { transform: scale(.96); }
+  /* Glow pulse (in your hull color) when it first appears, then again every 10–20 s */
+  #waitBot.pulse { animation: botPulse 1.4s ease-in-out 2; }
+  @keyframes botPulse {
+    0%, 100% { box-shadow: 0 0 0 transparent; border-color: var(--line); color: #fff; }
+    50% { box-shadow: 0 0 10px var(--c, #1DE9FF), 0 0 24px var(--c, #1DE9FF), inset 0 0 8px var(--c, #1DE9FF);
+          border-color: var(--c, #1DE9FF); color: var(--c, #1DE9FF); text-shadow: 0 0 8px var(--c, #1DE9FF); }
+  }
+  @media (prefers-reduced-motion: reduce) { #waitBot.pulse { animation-iteration-count: 1; } }
   #waitShare { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
   #pauseMenu { background: rgba(5,1,15,.86); }
   #updateBtn {
@@ -302,7 +310,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-022744';
+const BUILD = '20260929-024546';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -3052,6 +3060,11 @@ document.getElementById('quitBtn').addEventListener('click', () => { Sound.play(
 const BOT_OFFER_MS = 20000;
 let bgNet = null;                                     // Quick Play search running under a bot game
 const waitBot = document.getElementById('waitBot');
+let botPulseAt = 0;
+function pulseWaitBot() {
+  waitBot.style.setProperty('--c', ship.color);
+  waitBot.classList.remove('pulse'); void waitBot.offsetWidth; waitBot.classList.add('pulse');   // restart the animation
+}
 waitBot.addEventListener('click', () => {
   if (!net.searching) return;
   Sound.unlock(); Sound.play('click');
@@ -3074,6 +3087,8 @@ function syncHudButtons() {
   pauseBtn.classList.toggle('hidden', state !== 'play' || menuOpen);
   const waiting = state === 'play' && !menuOpen && mode === 'online' && net.searching && match.ph === 'wait';
   const showBot = waiting && performance.now() - (net.startedAt || performance.now()) > BOT_OFFER_MS;
+  if (showBot && waitBot.classList.contains('hidden')) { pulseWaitBot(); botPulseAt = performance.now() + rand(10000, 20000); }
+  else if (showBot && performance.now() >= botPulseAt) { pulseWaitBot(); botPulseAt = performance.now() + rand(10000, 20000); }
   waitBot.classList.toggle('hidden', !showBot);
   const showShare = state === 'play' && !menuOpen && mode === 'online' && !inClaude() && net.role === 'host' && !net.fromRandom && match.ph === 'wait' && !net.linked?.();
   waitShare.classList.toggle('hidden', !showShare);
