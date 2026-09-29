@@ -319,7 +319,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-171414';
+const BUILD = '20260929-175224';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1670,6 +1670,23 @@ async function iceServers() {
 }
 if (!inClaude()) iceServers();   // warm the cache at load
 
+/** Symmetric NAT = the SAME local socket shows up with different public ports for different
+ *  STUN servers. Safari/iOS hides which local socket an answer came from (raddr 0.0.0.0), so
+ *  there we can only decide when the device has a single socket; otherwise "can't tell"
+ *  (null) — never a false "strict", which would force slow relay-only links. */
+function natVerdict(g) {
+  if (!g || !g.srflx.length) return null;
+  const known = g.srflx.filter(c => c.raddr && !/^0\.0\.0\.0:|^:|^[^:]*:0?$/.test(c.raddr));
+  if (known.length === g.srflx.length) {
+    const bySock = new Map();
+    for (const c of known) { if (!bySock.has(c.raddr)) bySock.set(c.raddr, new Set()); bySock.get(c.raddr).add(c.port); }
+    return [...bySock.values()].some(ports => ports.size > 1);
+  }
+  const ports = new Set(g.srflx.map(c => c.ip + ':' + c.port));
+  if (ports.size <= 1) return false;
+  return g.hosts === 1 ? true : null;
+}
+
 /* Strict networks (symmetric NAT: many phones on office/school/some home Wi-Fi) can never
    link directly — only through the relay. Trying direct routes first wastes the whole
    attempt, so we check the network at load and go relay-only straight away when it's strict. */
@@ -1678,9 +1695,7 @@ const strictReady = (async () => {
   if (inClaude() || typeof RTCPeerConnection === 'undefined') return;
   await new Promise(r => setTimeout(r, 0));   // let iceGather (defined further down) exist
   const g = await iceGather(STUN_SERVERS, 'all', 3500);
-  if (!g || !g.srflx.length) return;
-  const ports = new Set(g.srflx.map(c => c.port)), bases = new Set(g.srflx.map(c => c.raddr));
-  strictNet = ports.size > bases.size;
+  strictNet = natVerdict(g);
 })();
 /** WebRTC settings for one connection attempt. Relay-only on strict networks, and on every
  *  second retry anywhere (covers networks the check can't spot). */
@@ -2787,15 +2802,21 @@ async function iceGather(servers, policy, ms = 6000) {
   try {
     pc = new RTCPeerConnection({ iceServers: servers, iceTransportPolicy: policy });
     pc.createDataChannel('probe');
-    const types = new Set(), srflx = [];
+    const types = new Set(), srflx = [], hosts = new Set();
     pc.onicecandidate = e => {
       const c = e.candidate && e.candidate.candidate; if (!c) return;
       const t = / typ (\w+)/.exec(c); if (t) types.add(t[1]);
-      if (t && t[1] === 'srflx') { const p = c.split(' '); srflx.push({ port: p[5], raddr: p[9] + ':' + p[11] }); }
+      const p = c.split(' '), udp = String(p[2]).toLowerCase() === 'udp';
+      if (!udp || !t) return;
+      if (t[1] === 'host') hosts.add(p[4] + ':' + p[5]);
+      if (t[1] === 'srflx') {
+        const ri = p.indexOf('raddr'), rp = p.indexOf('rport');
+        srflx.push({ ip: p[4], port: p[5], raddr: ri > 0 ? p[ri + 1] + ':' + (rp > 0 ? p[rp + 1] : '') : '' });
+      }
     };
     await pc.setLocalDescription(await pc.createOffer());
     await new Promise(res => { const tm = setTimeout(res, ms); pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(tm); res(); } }; });
-    return { types, srflx };
+    return { types, srflx, hosts: hosts.size };
   } catch (_) { return null; }
   finally { try { pc && pc.close(); } catch (_) {} }
 }
@@ -2868,10 +2889,12 @@ async function runNetworkTest() {
     const ok = g.types.has('srflx');
     ntSet('direct', ok ? 'ok' : 'warn', ok ? 'Found a public address (direct links possible)' : 'No public address found (direct links likely blocked)');
     // Symmetric NAT: the same local socket shows up with different public ports for different STUN servers
-    const ports = new Set(g.srflx.map(c => c.port)), bases = new Set(g.srflx.map(c => c.raddr));
+    const v = natVerdict(g), seen = `${new Set(g.srflx.map(c => c.ip + ':' + c.port)).size} public port(s), ${g.hosts} local socket(s)`;
+    strictNet = v;
     if (!g.srflx.length) ntSet('nat', 'warn', 'Unknown (no public address seen)');
-    else if (ports.size > bases.size) { strictNet = true; ntSet('nat', 'warn', 'Strict network (symmetric NAT) — games will use the backup relay'); }
-    else { strictNet = false; ntSet('nat', 'ok', 'Normal network'); }
+    else if (v === true) ntSet('nat', 'warn', `Strict network (symmetric NAT) — games will use the backup relay · ${seen}`);
+    else if (v === false) ntSet('nat', 'ok', 'Normal network');
+    else ntSet('nat', 'ok', `Probably normal (this browser hides some details) — games try a direct link first · ${seen}`);
   })();
   const turnT = (async () => {
     if (!hasRTC) { ntSet('turn', 'fail', 'Browser has no WebRTC'); return; }
