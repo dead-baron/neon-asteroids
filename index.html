@@ -137,7 +137,14 @@
     padding: 5px 12px; cursor: pointer;
   }
   #pauseBtn.hidden, #waitShare.hidden, #waitBot.hidden { display: none; }
-  #waitShare, #waitBot { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
+  /* Waiting in Quick Play: small top-right pill, out of the way of the warm-up field */
+  #waitBot {
+    position: fixed; z-index: 5; right: 12px; top: calc(env(safe-area-inset-top, 0px) + 6px);
+    font: inherit; font-weight: bold; font-size: 11px; letter-spacing: 2px; color: #fff; cursor: pointer;
+    background: rgba(5, 2, 15, .6); border: 1.5px solid var(--line); border-radius: 999px; padding: 6px 12px;
+  }
+  #waitBot:active { transform: scale(.96); }
+  #waitShare { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
   #pauseMenu { background: rgba(5,1,15,.86); }
   #updateBtn {
     position: fixed; z-index: 20; left: 50%; transform: translateX(-50%);
@@ -242,7 +249,7 @@
 <!-- ================= IN-GAME MENU ================= -->
 <button id="pauseBtn" class="hidden" aria-label="Game menu">☰ MENU</button>
 <button id="waitShare" class="btn small hidden">SHARE INVITE LINK</button>
-<button id="waitBot" class="btn small hidden">FIGHT A BOT WHILE YOU WAIT</button>
+<button id="waitBot" class="hidden" aria-label="Play a bot while you wait">+ ADD BOT</button>
 <div id="pauseMenu" class="overlay hidden">
   <h1 id="pauseTitle">PAUSED</h1>
   <div class="hint" id="pauseInfo"></div>
@@ -295,7 +302,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-001823';
+const BUILD = '20260929-022744';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1869,7 +1876,7 @@ function startGame(adopt = null) {
   track('game_start', { mode: modeLabel(), rematch: reuse ? 1 : 0, from_bot: adopt ? 1 : 0 });
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
-  Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false, surrendered: false });
+  Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false, surrendered: false, ufoT: undefined });
   tickCount = 0; leaveTimer = 0; overTicks = 0; practiceTotal = 0; lastBeat = -1; lastPh = '';
   joy.active = false; fire.held = false; ship.shots = 0;
   roomCode = '';
@@ -1918,10 +1925,33 @@ function endRound(res, why) {
   if (mode === 'practice') practiceTotal += match.sc[0];
 }
 
+/* Warm-up while waiting for a rival: an endless field. When the rocks are all
+   gone a fresh batch drifts in (never on top of you), and every 15–30 s a UFO
+   cruises through as target practice. Nothing counts and nothing can hurt you. */
+const WARMUP = { large: 4, medium: 1 };
+function warmupTick() {
+  if (world.asteroids.length === 0) {
+    if (++match.refill > 60) {
+      match.refill = 0;
+      const R = 190 * 190;
+      const place = size => {
+        let x, y, tries = 0;
+        do { x = Math.random() * W; y = Math.random() * H; tries++; } while (tries < 60 && wrapDist2({ x, y }, ship) < R);
+        world.asteroids.push(makeAsteroid(x, y, size, 0.9));
+      };
+      for (let i = 0; i < WARMUP.large; i++) place(3);
+      for (let i = 0; i < WARMUP.medium; i++) place(2);
+    }
+  } else match.refill = 0;
+  if (match.ufoT === undefined) match.ufoT = rand(8000, 14000);
+  match.ufoT -= CFG.TICK_MS;
+  if (match.ufoT <= 0) { if (!world.ufos.length) spawnUfo(); match.ufoT = rand(15000, 30000); }
+}
+
 /** Host / local: advance the round clock and decide rounds. */
 function matchTick() {
   const dt = CFG.TICK_MS;
-  if (match.ph === 'wait') { if (opp) startRound(1); return; }
+  if (match.ph === 'wait') { if (opp) startRound(1); else if (mode === 'online') warmupTick(); return; }
   if (match.ph === 'intro') { match.t -= dt; if (match.t <= 0) { match.ph = 'play'; match.t = CFG.ROUND_MS; flashTimer = 45; } return; }
   if (match.ph === 'play') {
     match.t -= dt; match.elapsed += dt;
@@ -3045,7 +3075,6 @@ function syncHudButtons() {
   const waiting = state === 'play' && !menuOpen && mode === 'online' && net.searching && match.ph === 'wait';
   const showBot = waiting && performance.now() - (net.startedAt || performance.now()) > BOT_OFFER_MS;
   waitBot.classList.toggle('hidden', !showBot);
-  if (showBot) waitBot.style.top = Math.round(H * 0.17 + 104) + 'px';
   const showShare = state === 'play' && !menuOpen && mode === 'online' && !inClaude() && net.role === 'host' && !net.fromRandom && match.ph === 'wait' && !net.linked?.();
   waitShare.classList.toggle('hidden', !showShare);
   if (showShare) waitShare.style.top = Math.round(H * 0.17 + 104) + 'px';
