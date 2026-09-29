@@ -88,6 +88,7 @@
     border: 2px solid var(--line); border-radius: 6px; padding: 12px 16px; min-width: 120px;
   }
   .btn.sel { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 10px var(--cyan), inset 0 0 10px rgba(0,240,255,.35); }
+  #quickBtn small { display: block; margin-top: 5px; font-size: 10px; letter-spacing: 2px; font-weight: normal; text-transform: uppercase; opacity: .8; text-shadow: none; }
   .btn.go {
     font-size: 22px; padding: 15px 44px; border-color: var(--accent, #00f0ff); color: var(--accent, #00f0ff);
     box-shadow: 0 0 14px var(--accent, #00f0ff), inset 0 0 14px var(--accent, #00f0ff);
@@ -205,8 +206,8 @@
   <div class="dots" id="dots"></div>
   <div class="dot-name" id="dotName">NEON PINK</div>
 
-  <!-- LAUNCH: one tap into an online Quick Play match with whoever else is searching -->
-  <button class="btn go" id="quickBtn" style="--accent:#00f0ff">LAUNCH</button>
+  <!-- QUICK PLAY: one tap into an online match with whoever else is searching -->
+  <button class="btn go" id="quickBtn" style="--accent:#00f0ff">QUICK PLAY<small id="quickSub">instant 1v1 vs. anyone online</small></button>
 
   <div class="label">OR CHOOSE</div>
   <div class="modes" id="modeRow">
@@ -310,7 +311,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-041921';
+const BUILD = '20260929-133714';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2628,6 +2629,7 @@ function quickPlay() {
   menuEl.classList.add('hidden'); startGame();
 }
 const quickBtn = document.getElementById('quickBtn');
+if (inClaude()) document.getElementById('quickSub').textContent = 'instant match vs. the bot';   // no open-web matchmaker inside Claude
 quickBtn.addEventListener('click', quickPlay);
 
 /* Invite links (?room=CODE) open straight into ONLINE → JOIN with the code filled in. */

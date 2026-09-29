@@ -6,7 +6,7 @@ Best of 3 rounds, 1 minute each; 3 hits and your ship is scrap. Round 3 brings U
 **Play:** https://deadbaron.com/neon-asteroids/ (also https://dead-baron.github.io/neon-asteroids/, which redirects there)
 
 ## Menu
-- **LAUNCH**: one tap into an online Quick Play match with the next pilot searching.
+- **QUICK PLAY**: one tap into an online Quick Play match with the next pilot searching.
 - **ONLINE → HOST**: get a 4-letter room code; share the invite link (menu or waiting screen).
 - **ONLINE → JOIN**: type your friend's code, or just open their invite link.
 - **ONLINE → QUICK PLAY**: same as LAUNCH.
