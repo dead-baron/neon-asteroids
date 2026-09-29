@@ -310,7 +310,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-024546';
+const BUILD = '20260929-041921';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1845,9 +1845,9 @@ function spawnTier(tier) {
 }
 
 let nextUfoId = 1;
-function spawnUfo() {
+function spawnUfo(quiet = false) {
   const left = Math.random() < 0.5, y = H * rand(0.12, 0.7);
-  Sound.play('ufo');
+  if (!quiet) Sound.play('ufo');
   world.ufos.push({ id: nextUfoId++, x: left ? -20 : W + 20, y, base: y, vx: (left ? 1 : -1) * rand(1.2, 1.7), vy: 0,
                     age: 0, fireT: 70, shots: CFG.UFO_SHOTS, sh: 0, aim: 0 });
 }
@@ -1953,7 +1953,7 @@ function warmupTick() {
   } else match.refill = 0;
   if (match.ufoT === undefined) match.ufoT = rand(8000, 14000);
   match.ufoT -= CFG.TICK_MS;
-  if (match.ufoT <= 0) { if (!world.ufos.length) spawnUfo(); match.ufoT = rand(15000, 30000); }
+  if (match.ufoT <= 0) { if (!world.ufos.length) spawnUfo(true); match.ufoT = rand(15000, 30000); }
 }
 
 /** Host / local: advance the round clock and decide rounds. */
