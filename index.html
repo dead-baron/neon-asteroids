@@ -136,8 +136,8 @@
     color: #cfc6ff; background: rgba(5,1,15,.6); border: 1px solid var(--line); border-radius: 14px;
     padding: 5px 12px; cursor: pointer;
   }
-  #pauseBtn.hidden, #waitShare.hidden { display: none; }
-  #waitShare { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
+  #pauseBtn.hidden, #waitShare.hidden, #waitBot.hidden { display: none; }
+  #waitShare, #waitBot { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); top: 30%; white-space: nowrap; }
   #pauseMenu { background: rgba(5,1,15,.86); }
   #updateBtn {
     position: fixed; z-index: 20; left: 50%; transform: translateX(-50%);
@@ -242,6 +242,7 @@
 <!-- ================= IN-GAME MENU ================= -->
 <button id="pauseBtn" class="hidden" aria-label="Game menu">☰ MENU</button>
 <button id="waitShare" class="btn small hidden">SHARE INVITE LINK</button>
+<button id="waitBot" class="btn small hidden">FIGHT A BOT WHILE YOU WAIT</button>
 <div id="pauseMenu" class="overlay hidden">
   <h1 id="pauseTitle">PAUSED</h1>
   <div class="hint" id="pauseInfo"></div>
@@ -294,7 +295,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260928-234853';
+const BUILD = '20260929-001823';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1859,13 +1860,13 @@ function updateUfosAuthority() {
   }
 }
 
-function startGame() {
+function startGame(adopt = null) {
   // Rematch on a live direct link: keep it (no trip back through matchmaking)
   const code = currentCode();
-  const reuse = mode === 'online' && net.keepAlive && !net.closed && (
+  const reuse = !adopt && mode === 'online' && net.keepAlive && !net.closed && (
     (onlineRole === 'random' ? (net.fromRandom && net.linked && net.linked()) : (net.code === code && net.role === onlineRole)));
   if (!reuse) net.close();
-  track('game_start', { mode: modeLabel(), rematch: reuse ? 1 : 0 });
+  track('game_start', { mode: modeLabel(), rematch: reuse ? 1 : 0, from_bot: adopt ? 1 : 0 });
   world.asteroids.length = world.bullets.length = world.rings.length = world.ufos.length = 0;
   Particles.clear(); remotes.clear(); opp = null;
   Object.assign(match, { rn: 0, ph: 'wait', t: 0, wins: [0, 0], sc: [0, 0], res: '', why: '', elapsed: 0, ufoIdx: 0, refill: 0, forfeit: false, surrendered: false });
@@ -1877,6 +1878,11 @@ function startGame() {
     if (onlineRole !== 'random') showCode(roomCode);
     if (reuse) {
       wasHost = net.isHost; awaitingFirstSnap = !net.isHost;
+      resetShipForRound();
+      spawnTier(TIERS[1]);
+    } else if (adopt) {                              // a Quick Play match found while fighting the bot
+      net = adopt; roomCode = adopt.code || '';
+      awaitingFirstSnap = true; wasHost = true;
       resetShipForRound();
       spawnTier(TIERS[1]);
     } else {
@@ -2001,7 +2007,10 @@ function wireNetHandlers(n) {
     else remotes.delete(m.id);
   });
   n.on('snapshot', applySnapshot);
-  n.on('code', m => { roomCode = m.code; if (onlineRole !== 'random') showCode(m.code); });   // code picked (taken code / quick match)
+  n.on('code', m => {                                 // code picked (taken code / quick match)
+    if (n === bgNet) { adoptQuickMatch(); return; }   // found a pilot while fighting the bot
+    roomCode = m.code; if (onlineRole !== 'random') showCode(m.code);
+  });
   n.on('full', () => {
     net.close(); state = 'menu'; opp = null;
     menuEl.classList.remove('hidden'); seedAmbient();
@@ -2389,6 +2398,10 @@ function drawHUD() {
     const full = Math.round(CFG.ROUND_MS / 1000);
     const secs = clamp(match.ph === 'play' ? Math.ceil(match.t / 1000) : match.ph === 'intro' ? full : 0, 0, full);
     glowText(`${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`, W / 2, top + 49, match.ph === 'play' && secs <= 10 ? '#ff2d4b' : '#ffffff', 22, 'center');
+  }
+  if (bgNet && bgNet.searching) {
+    const n = bgNet.poolSize();
+    glowText(`SEARCHING FOR A PILOT · ${n} IN POOL`, W / 2, top + 66, '#8b80c4', 10, 'center', 0);
   }
   if (mode === 'online') {
     const searching = !net.status || net.status === 'CONNECTING…' || net.status.startsWith('STILL SEARCHING') || net.status === 'OPENING ROOM…';
@@ -2958,13 +2971,14 @@ Ads.init();
 document.getElementById('againBtn').addEventListener('click', () => {
   Sound.unlock(); Sound.play('click');
   const go = () => { overEl.classList.add('hidden'); startGame(); };
-  if (mode === 'online') go(); else Ads.between('rematch', go);   // online rivals are waiting: no ad here
+  if (mode === 'online' || bgNet) go(); else Ads.between('rematch', go);   // online rivals are waiting: no ad here
 });
 function backToMenu() {
   if (state === 'play' && mode === 'online' && net.linked && !net.linked()) track('connect_abandon', {
     mode: modeLabel(), secs: Math.round((performance.now() - (net.startedAt || performance.now())) / 1000),
     relay: net.diag && net.diag.relay ? 1 : 0, strict: strictNet === true ? 1 : 0, attempts: net.joinAttempt || net.poolAttempt || 1 });
   net.close(); leaveTimer = 0;
+  if (bgNet) { bgNet.close(); bgNet = null; }
   closeMenu(true);
   overEl.classList.add('hidden'); menuEl.classList.remove('hidden');
   state = 'menu'; opp = null; joy.active = false; fire.held = false; seedAmbient();
@@ -2999,9 +3013,39 @@ document.getElementById('surrenderBtn').addEventListener('click', () => {
 });
 document.getElementById('quitBtn').addEventListener('click', () => { Sound.play('click'); backToMenu(); });
 
+/* ---------------------------------------------------------------------
+   QUICK PLAY → BOT WHILE YOU WAIT
+   After BOT_OFFER_MS alone in the Quick Play pool, offer a bot match. The pool
+   search keeps running in the background (bgNet); the moment it pairs us with a
+   real pilot, the bot game is dropped and the online match takes over.
+   --------------------------------------------------------------------- */
+const BOT_OFFER_MS = 20000;
+let bgNet = null;                                     // Quick Play search running under a bot game
+const waitBot = document.getElementById('waitBot');
+waitBot.addEventListener('click', () => {
+  if (!net.searching) return;
+  Sound.unlock(); Sound.play('click');
+  track('bot_while_waiting', { secs: Math.round((performance.now() - (net.startedAt || performance.now())) / 1000) });
+  bgNet = net; net = new NullAdapter();               // keep searching; startGame won't close it
+  mode = 'bot';
+  startGame();
+});
+function adoptQuickMatch() {
+  const found = bgNet; bgNet = null;
+  if (!found || found.closed) return;
+  closeMenu(true); overEl.classList.add('hidden');
+  opp = null; remotes.clear();
+  mode = 'online'; onlineRole = 'random';
+  startGame(found);
+}
+
 /** HUD buttons live in the page, not the canvas: show them only when they apply. */
 function syncHudButtons() {
   pauseBtn.classList.toggle('hidden', state !== 'play' || menuOpen);
+  const waiting = state === 'play' && !menuOpen && mode === 'online' && net.searching && match.ph === 'wait';
+  const showBot = waiting && performance.now() - (net.startedAt || performance.now()) > BOT_OFFER_MS;
+  waitBot.classList.toggle('hidden', !showBot);
+  if (showBot) waitBot.style.top = Math.round(H * 0.17 + 104) + 'px';
   const showShare = state === 'play' && !menuOpen && mode === 'online' && !inClaude() && net.role === 'host' && !net.fromRandom && match.ph === 'wait' && !net.linked?.();
   waitShare.classList.toggle('hidden', !showShare);
   if (showShare) waitShare.style.top = Math.round(H * 0.17 + 104) + 'px';
