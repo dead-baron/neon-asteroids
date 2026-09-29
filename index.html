@@ -125,7 +125,7 @@
   #modeRow, #practiceRow { max-width: 300px; }
   #practiceRow .btn { font-size: 12px; padding: 9px 4px; }
   #practiceRow.hidden { display: none; }
-  #startBtn.hidden { display: none; }
+  #startBtn.hidden, #quickBtn.hidden, #orChoose.hidden { display: none; }
   #randomRole[hidden] { display: none; }
   #roleRow .btn { padding: 10px 4px; }
 
@@ -209,7 +209,7 @@
   <!-- QUICK PLAY: one tap into an online match with whoever else is searching -->
   <button class="btn go" id="quickBtn" style="--accent:#00f0ff">QUICK PLAY<small id="quickSub">instant 1v1 vs. anyone online</small></button>
 
-  <div class="label">OR CHOOSE</div>
+  <div class="label" id="orChoose">OR CHOOSE</div>
   <div class="modes" id="modeRow">
     <button class="btn" data-mode="online">ONLINE</button>
     <button class="btn" data-mode="practice">PRACTICE</button>
@@ -311,7 +311,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-133714';
+const BUILD = '20260929-134149';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -2565,6 +2565,9 @@ function refreshMenu() {
   const online = menuSection === 'online', manual = online && (onlineRole === 'host' || onlineRole === 'join');
   document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('sel', x.dataset.mode === menuSection));
   roomBox.classList.toggle('hidden', !online);
+  // Online open (Host / Join / Quick Play live there): hide the big QUICK PLAY button to avoid a duplicate
+  document.getElementById('quickBtn').classList.toggle('hidden', online);
+  document.getElementById('orChoose').classList.toggle('hidden', online);
   document.getElementById('practiceRow').classList.toggle('hidden', menuSection !== 'practice');
   document.getElementById('hostPanel').classList.toggle('hidden', !(online && onlineRole === 'host'));
   document.getElementById('joinPanel').classList.toggle('hidden', !(online && onlineRole === 'join'));
