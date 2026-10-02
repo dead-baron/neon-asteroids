@@ -6,6 +6,12 @@
 <meta name="theme-color" content="#05010f">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Neon Asteroids">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="description" content="Neon 1v1 Asteroids dogfights, free in your browser. Phone vs. desktop cross-play, best of 3, one-minute rounds. Quick Play, private matches or practice vs. a bot.">
 <meta property="og:site_name" content="Dead Baron">
 <meta property="og:title" content="Neon Asteroids: 1v1 multiplayer, free in your browser">
@@ -192,6 +198,12 @@
   .nt-verdict.bad { border-color: #ff2d4b; box-shadow: 0 0 12px rgba(255,45,75,.4); }
   #buildTag { font-size: 10px; opacity: .6; }
 
+  #fsBtn.hidden, #fsBtn2.hidden, #installBtn.hidden, #installNote.hidden, #padToast.hidden { display: none; }
+  /* Controller: highlight the focused button */
+  .pad-focus { outline: 2px solid #fff !important; outline-offset: 4px; box-shadow: 0 0 16px rgba(255,255,255,.55) !important; }
+  #padToast { position: fixed; z-index: 60; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
+    max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 10px; background: rgba(5,2,15,.88); border: 1.5px solid var(--line);
+    color: #fff; font: bold 11px/1.6 "Courier New", monospace; letter-spacing: 1.5px; text-align: center; box-shadow: 0 0 18px rgba(0,0,0,.6); }
   #rotate { display: none; }
   @media (orientation: landscape) and (max-height: 520px) {
     #rotate { display: flex; z-index: 50; font-size: 20px; letter-spacing: 3px; color: var(--cyan); text-shadow: 0 0 10px var(--cyan); }
@@ -257,7 +269,10 @@
   <div class="small-row">
     <button class="btn small" id="soundBtn">SOUND: ON</button>
     <button class="btn small" id="ntBtn">NETWORK TEST</button>
+    <button class="btn small hidden" id="fsBtn">FULLSCREEN</button>
+    <button class="btn small hidden" id="installBtn">INSTALL APP</button>
   </div>
+  <div class="note hidden" id="installNote"></div>
   <div class="note" id="buildTag"></div>
 </div>
 
@@ -275,7 +290,9 @@
   <button class="btn" id="quitBtn">QUIT TO MENU</button>
   <button class="btn small" id="ntBtn2">NETWORK TEST</button>
   <button class="btn small" id="soundBtn2">SOUND: ON</button>
+  <button class="btn small hidden" id="fsBtn2">FULLSCREEN</button>
 </div>
+<div id="padToast" class="hidden" role="status"></div>
 
 <!-- ================= MATCH OVER ================= -->
 <div id="over" class="overlay hidden">
@@ -319,7 +336,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-175224';
+const BUILD = '20261002-172202';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -418,13 +435,26 @@ const toFieldAngle = sa => Math.atan2(Math.sin(sa) / SY, Math.cos(sa) / SX);
 /** Pixel offset on this screen → heading in field units. */
 const fieldAngleTo = (dx, dy) => Math.atan2(dy / SY, dx / SX);
 
+/** Screen size changed (fullscreen, rotation, window resize): keep every object at the
+ *  same spot in the playfield instead of leaving it at its old pixel position. */
+function rescaleWorld(kx, ky) {
+  const sc = o => { if (!o) return; if (o.x !== undefined) o.x *= kx; if (o.y !== undefined) o.y *= ky;
+    if (o.tx !== undefined) o.tx *= kx; if (o.ty !== undefined) o.ty *= ky; if (o.base !== undefined) o.base *= ky; };
+  try {
+    for (const list of [world.asteroids, world.ufos, world.bullets, world.rings]) list.forEach(sc);
+    for (let i = 0; i < Particles.count; i++) sc(Particles.pool[i]);
+    sc(ship); if (opp) sc(opp);
+  } catch (_) {}
+}
 function resize() {
   // Crisp but affordable: cap the canvas at ~3.5 million pixels so full-screen desktops keep 60 fps
   DPR = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(3.5e6 / Math.max(1, window.innerWidth * window.innerHeight)));
   // Full window on every device. Online positions travel as fractions of the screen,
   // so a phone and a wide monitor still share one playfield.
+  const ow = W, oh = H;
   W = window.innerWidth; H = window.innerHeight;
   SX = W / REF_W; SY = H / REF_H;
+  if (ow && oh && (ow !== W || oh !== H) && typeof rescaleWorld === 'function') rescaleWorld(W / ow, H / oh);
   canvas.classList.toggle('desk', DESKTOP);
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -472,7 +502,10 @@ function mulberry32(seed) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} };
+const buzz = ms => {
+  try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {}
+  try { if (typeof padRumble === 'function') padRumble(ms); } catch (_) {}
+};
 
 /* =====================================================================
    4. PARTICLE SYSTEM — pooled, adapts to frame rate
@@ -1900,6 +1933,7 @@ function updateUfosAuthority() {
 }
 
 function startGame(adopt = null) {
+  FS.auto();
   // Rematch on a live direct link: keep it (no trip back through matchmaking)
   const code = currentCode();
   const reuse = !adopt && mode === 'online' && net.keepAlive && !net.closed && (
@@ -2287,7 +2321,8 @@ function update() {
   if (playing && ship.alive) {
     const live = canFly();
     ship.thrust = 0;
-    if (live && !DESKTOP && joy.active && joy.mag > CFG.AIM_DEADZONE) {
+    if (live && padSteer()) { /* controller steered this tick */ }
+    else if (live && !DESKTOP && joy.active && joy.mag > CFG.AIM_DEADZONE) {
       ship.a += angDiff(toFieldAngle(joy.angle), ship.a) * CFG.TURN_LERP;  // facing ≠ travel direction
       ship.thrust = clamp((joy.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
     } else if (live && DESKTOP) desktopSteer();
@@ -2536,6 +2571,7 @@ function frame(t) {
   if (dt > 250) dt = 250;
   if (dt > 0) fpsAvg = fpsAvg * 0.95 + (1000 / dt) * 0.05;
   Particles.quality = fpsAvg < 40 ? 0.4 : fpsAvg < 52 ? 0.7 : 1;
+  padPoll();
   if (!paused && !(menuOpen && mode !== 'online')) {
     acc += dt; let steps = 0;
     const slack = CFG.TICK_MS * 0.25;               // absorb frame-timing jitter
@@ -3117,6 +3153,223 @@ function adoptQuickMatch() {
   opp = null; remotes.clear();
   mode = 'online'; onlineRole = 'random';
   startGame(found);
+}
+
+/* =====================================================================
+   FULLSCREEN · INSTALLABLE APP · CONTROLLERS
+   ===================================================================== */
+
+/* ---- Fullscreen. Phones go fullscreen automatically when a game starts (a tap is
+   required by browsers, so it happens on the button press). The FULLSCREEN button
+   toggles it and the choice is remembered. iPhone Safari has no fullscreen API —
+   there, installing to the Home Screen gives the full-screen app instead. ---- */
+const FS = {
+  key: 'neonAsteroids.fullscreen',
+  supported: !!(document.fullscreenEnabled || document.webkitFullscreenEnabled),
+  isOn: () => !!(document.fullscreenElement || document.webkitFullscreenElement),
+  installed: () => {
+    try { return matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }
+    catch (_) { return false; }
+  },
+  wanted() { let v = null; try { v = localStorage.getItem(this.key); } catch (_) {} return v ? v === 'on' : !DESKTOP; },
+  remember(on) { try { localStorage.setItem(this.key, on ? 'on' : 'off'); } catch (_) {} },
+  enter() {
+    if (!this.supported || this.isOn() || inClaude()) return;
+    const el = document.documentElement;
+    try {
+      const r = el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen && el.webkitRequestFullscreen();
+      Promise.resolve(r).then(() => {
+        try { if (!DESKTOP && screen.orientation && screen.orientation.lock) screen.orientation.lock('portrait').catch(() => {}); } catch (_) {}
+      }).catch(() => {});
+    } catch (_) {}
+  },
+  exit() { try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {} },
+  auto() { if (this.wanted() && !this.installed()) this.enter(); },
+  toggle() { if (this.isOn()) { this.remember(false); this.exit(); } else { this.remember(true); this.enter(); } },
+  label() {
+    const show = this.supported && !this.installed() && !inClaude();
+    for (const id of ['fsBtn', 'fsBtn2']) {
+      const b = document.getElementById(id); if (!b) continue;
+      b.classList.toggle('hidden', !show); b.textContent = this.isOn() ? 'EXIT FULLSCREEN' : 'FULLSCREEN';
+    }
+  },
+};
+for (const id of ['fsBtn', 'fsBtn2']) document.getElementById(id).addEventListener('click', () => { Sound.unlock(); Sound.play('click'); FS.toggle(); });
+document.addEventListener('fullscreenchange', () => { FS.label(); setTimeout(resize, 60); });
+document.addEventListener('webkitfullscreenchange', () => { FS.label(); setTimeout(resize, 60); });
+FS.label();
+
+/* ---- Installable app (PWA): manifest + service worker make Chrome offer
+   "Install app"; our INSTALL APP button triggers it directly. iPhone/iPad use
+   Share → Add to Home Screen (we show how). Installed, it runs full screen. ---- */
+let installPrompt = null;
+const installBtn = document.getElementById('installBtn'), installNote = document.getElementById('installNote');
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function refreshInstall() {
+  const canShow = !inClaude() && !FS.installed() && (installPrompt || isIOS);
+  installBtn.classList.toggle('hidden', !canShow);
+  installBtn.textContent = isIOS && !installPrompt ? 'ADD TO HOME SCREEN' : 'INSTALL APP';
+}
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; refreshInstall(); });
+window.addEventListener('appinstalled', () => { installPrompt = null; refreshInstall(); installNote.classList.add('hidden'); track('app_installed'); });
+installBtn.addEventListener('click', async () => {
+  Sound.unlock(); Sound.play('click');
+  if (installPrompt) {
+    installPrompt.prompt();
+    try { const r = await installPrompt.userChoice; track('install_prompt', { outcome: r && r.outcome }); } catch (_) {}
+    installPrompt = null; refreshInstall();
+  } else if (isIOS) {
+    installNote.textContent = 'In Safari: tap the Share button (square with ↑), then "Add to Home Screen".';
+    installNote.classList.toggle('hidden');
+  }
+});
+refreshInstall();
+if ('serviceWorker' in navigator && !inClaude() && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+
+/* ---- Controllers (Xbox, PlayStation, Switch Pro, most Bluetooth/USB pads via the
+   browser Gamepad API, "standard" mapping):
+     In game:  LEFT STICK steer (push far = thrust) · D-PAD ←/→ turn, ↑ thrust, ↓ brake
+               A / RB / RT fire (hold for steady fire) · B / LT brake
+               Y = ADD BOT while waiting · START / VIEW = menu
+     Menus:    STICK or D-PAD move · A select · B back
+   Browsers only reveal a controller after its first button press. ---- */
+const Pad = { on: false, prev: [], focus: null, navAt: 0, navDir: '', toastT: null, steer: null, used: false, lastG: null };
+const PAD_DEAD = 0.18;
+function padGet() {
+  if (!navigator.getGamepads) return null;
+  let gps; try { gps = navigator.getGamepads(); } catch (_) { return null; }
+  for (const g of gps || []) if (g && g.connected && g.buttons && g.buttons.length) return g;
+  return null;
+}
+const padBtn = (g, i) => { const b = g.buttons[i]; return !!(b && (b.pressed || b.value > 0.45)); };
+function padToast(msg, ms = 6000) {
+  const t = document.getElementById('padToast');
+  t.innerHTML = msg; t.classList.remove('hidden');
+  clearTimeout(Pad.toastT); Pad.toastT = setTimeout(() => t.classList.add('hidden'), ms);
+}
+window.addEventListener('gamepadconnected', e => {
+  Pad.on = true;
+  padToast('🎮 CONTROLLER CONNECTED<br>STICK steer · push far to thrust · A / RT fire<br>B / LT brake · START menu');
+  track('controller', { id: String(e.gamepad && e.gamepad.id || '').slice(0, 60) });
+});
+window.addEventListener('gamepaddisconnected', () => { Pad.on = !!padGet(); if (fire.id === 'pad') fireRelease('pad'); padToast('🎮 CONTROLLER DISCONNECTED', 2500); });
+function padRumble(ms) {
+  const g = Pad.lastG, a = g && g.vibrationActuator;
+  if (!a || !a.playEffect) return;
+  try { a.playEffect('dual-rumble', { duration: Math.min(ms * 1.5, 400), strongMagnitude: ms > 100 ? 1 : 0.6, weakMagnitude: 0.5 }).catch(() => {}); } catch (_) {}
+}
+
+/** Called every frame: reads the controller, handles firing and menu navigation. */
+function padPoll() {
+  const g = padGet(); Pad.lastG = g;
+  if (!g) { Pad.steer = null; if (fire.id === 'pad') fireRelease('pad'); return; }
+  const pressed = i => padBtn(g, i), tap = i => pressed(i) && !Pad.prev[i];
+  const ax = g.axes[0] || 0, ay = g.axes[1] || 0, mag = Math.hypot(ax, ay);
+  const inGame = state === 'play' && !menuOpen;
+
+  if (inGame) {
+    // steering (applied in update via padSteer)
+    const stick = mag > PAD_DEAD ? { angle: Math.atan2(ay, ax), mag: Math.min(1, (mag - PAD_DEAD) / (1 - PAD_DEAD)) } : null;
+    const turn = (pressed(15) ? 1 : 0) - (pressed(14) ? 1 : 0);
+    Pad.steer = { stick, turn, up: pressed(12), brake: pressed(13) || pressed(1) || pressed(6) };
+    if (stick || turn || Pad.steer.up) Pad.used = true;
+    // fire: A, RB or RT
+    const fireNow = pressed(0) || pressed(5) || pressed(7);
+    if (fireNow && !(fire.held && fire.id === 'pad')) { Sound.unlock(); firePress('pad'); }
+    else if (!fireNow && fire.id === 'pad') fireRelease('pad');
+    // Y: ADD BOT while waiting · START / VIEW: menu
+    if (tap(3) && !waitBot.classList.contains('hidden')) waitBot.click();
+    if (tap(9) || tap(8)) { Sound.play('click'); openMenu(); }
+    padFocus(null);
+  } else {
+    Pad.steer = null;
+    if (fire.id === 'pad') fireRelease('pad');
+    padNavigate(g, pressed, tap, ax, ay);
+  }
+  Pad.prev = g.buttons.map((b, i) => pressed(i));
+}
+
+/** Apply controller steering to the ship. Returns true if the controller moved it. */
+function padSteer() {
+  const s = Pad.steer; if (!s) return false;
+  let used = false;
+  if (s.stick) {
+    ship.a += angDiff(toFieldAngle(s.stick.angle), ship.a) * CFG.TURN_LERP;
+    ship.thrust = clamp((s.stick.mag - CFG.THRUST_START) / (1 - CFG.THRUST_START), 0, 1);
+    used = true;
+  }
+  if (s.turn) { ship.a += s.turn * CFG.KEY_TURN; used = true; }
+  if (s.up) { ship.thrust = 1; used = true; }
+  if (s.brake) { ship.vx *= 0.95; ship.vy *= 0.95; used = true; }
+  return used;
+}
+
+/* ---- Menu navigation with the controller ---- */
+function padScreen() {
+  for (const id of ['netTest', 'pauseMenu', 'over', 'menu']) {
+    const el = document.getElementById(id);
+    if (el && !el.classList.contains('hidden')) return el;
+  }
+  return null;
+}
+function padTargets(root) {
+  return [...root.querySelectorAll('button, input, .dot')].filter(el =>
+    !el.hidden && !el.disabled && el.offsetParent !== null && !el.classList.contains('hidden'));
+}
+function padFocus(el) {
+  if (Pad.focus && Pad.focus !== el) Pad.focus.classList.remove('pad-focus');
+  Pad.focus = el;
+  if (el) { el.classList.add('pad-focus'); try { el.focus({ preventScroll: false }); } catch (_) {} el.scrollIntoView({ block: 'nearest' }); }
+}
+function padNavigate(g, pressed, tap, ax, ay) {
+  const root = padScreen(); if (!root) { padFocus(null); return; }
+  // B = back, START/VIEW closes the in-game menu — these work even before anything is highlighted
+  if (tap(1)) {
+    if (root.id === 'pauseMenu') { Sound.play('click'); closeMenu(); return; }
+    if (root.id === 'netTest') { document.getElementById('ntClose').click(); return; }
+  }
+  if ((tap(9) || tap(8)) && root.id === 'pauseMenu') { Sound.play('click'); closeMenu(); return; }
+  const list = padTargets(root); if (!list.length) return;
+  if (!Pad.focus || !list.includes(Pad.focus)) {
+    if (!(tap(0) || tap(12) || tap(13) || tap(14) || tap(15) || Math.hypot(ax, ay) > 0.6)) return;   // wake on first input
+    Pad.navDir = pressed(12) ? 'up' : pressed(13) ? 'down' : pressed(14) ? 'left' : pressed(15) ? 'right' : 'stick';
+    Pad.navAt = performance.now() + 400;                            // the waking press only shows the focus
+    padFocus(root.querySelector('.btn.go:not(.hidden)') && list.includes(root.querySelector('.btn.go:not(.hidden)'))
+      ? root.querySelector('.btn.go:not(.hidden)') : list[0]);
+    return;
+  }
+  // direction from d-pad or stick (with key-repeat style timing)
+  let dir = pressed(12) ? 'up' : pressed(13) ? 'down' : pressed(14) ? 'left' : pressed(15) ? 'right' : '';
+  if (!dir && Math.hypot(ax, ay) > 0.6) dir = Math.abs(ax) > Math.abs(ay) ? (ax > 0 ? 'right' : 'left') : (ay > 0 ? 'down' : 'up');
+  const t = performance.now();
+  if (dir && Pad.navDir === 'stick' && Math.hypot(ax, ay) > 0.6) dir = '';   // stick still held from the wake
+  if (dir && (dir !== Pad.navDir || t >= Pad.navAt)) {
+    Pad.navAt = t + (dir !== Pad.navDir ? 320 : 150); Pad.navDir = dir;
+    const next = padNeighbor(Pad.focus, list, dir);
+    if (next) { padFocus(next); Sound.play('click'); }
+  } else if (!dir) Pad.navDir = '';
+  if (tap(0)) { Sound.unlock(); Pad.focus.click(); }
+}
+function padNeighbor(from, list, dir) {
+  // Edge-based: a target must lie beyond the current button's edge in that direction;
+  // closest gap wins, staying in the same row/column is preferred.
+  const r = from.getBoundingClientRect();
+  let best = null, bestScore = Infinity;
+  for (const el of list) {
+    if (el === from) continue;
+    const q = el.getBoundingClientRect();
+    const gap = dir === 'right' ? q.left - r.right : dir === 'left' ? r.left - q.right
+              : dir === 'down' ? q.top - r.bottom : r.top - q.bottom;
+    if (gap < -10) continue;
+    const horiz = dir === 'left' || dir === 'right';
+    const side = horiz ? Math.max(0, q.top - r.bottom, r.top - q.bottom) : Math.max(0, q.left - r.right, r.left - q.right);
+    const centre = horiz ? Math.abs((q.top + q.bottom) - (r.top + r.bottom)) / 2 : Math.abs((q.left + q.right) - (r.left + r.right)) / 2;
+    const score = Math.max(0, gap) + side * 2 + centre * 0.15;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  return best;
 }
 
 /** HUD buttons live in the page, not the canvas: show them only when they apply. */
