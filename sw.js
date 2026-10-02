@@ -1,7 +1,9 @@
 /* Neon Asteroids service worker — makes the game installable and lets the menu open offline.
    Network-first for everything on this site: players always get the newest build when online
    (the in-game "NEW VERSION READY" check keeps working); the cached copy is only a fallback.
-   Requests to other sites (matchmaking library, relays, analytics) are never touched. */
+   Requests to other sites (matchmaking library, relays, analytics) are never touched.
+   Only this game's own caches are ever cleared, so other games on deadbaron.com (e.g. /gear-bugs/)
+   keep their offline copies. */
 const CACHE = 'neon-asteroids-v1';
 const CORE = ['./', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
@@ -9,7 +11,7 @@ self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).catch(() => {}).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('neon-asteroids-') && k !== CACHE).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', e => {
