@@ -198,6 +198,18 @@
   .nt-verdict.bad { border-color: #ff2d4b; box-shadow: 0 0 12px rgba(255,45,75,.4); }
   #buildTag { font-size: 10px; opacity: .6; }
 
+  #rmStatus.hidden, #rmRow.hidden, #rmHelp.hidden { display: none; }
+  .rm-status { max-width: 320px; font-size: 13px; letter-spacing: 1px; line-height: 1.5; color: #fff; text-align: center;
+    padding: 10px 14px; border-radius: 8px; border: 1.5px solid var(--line); background: rgba(5,2,15,.6); }
+  .rm-status.ask { border-color: #FFAA2B; color: #FFE9B0; box-shadow: 0 0 14px rgba(255,170,43,.45); }
+  .rm-status.bad { border-color: #ff2d4b; color: #ffd0d6; }
+  #againBtn.pulse { animation: botPulse 1.2s ease-in-out infinite; }
+  #againBtn.waiting { opacity: .65; }
+  #rmHelp { position: fixed; z-index: 30; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+    width: min(360px, calc(100vw - 32px)); padding: 14px 16px; border-radius: 12px; background: rgba(5,2,15,.92);
+    border: 1.5px solid #FFAA2B; box-shadow: 0 0 20px rgba(255,170,43,.35); color: #fff; font: 12px/1.6 "Courier New", monospace; letter-spacing: .5px; }
+  .rm-help-title { font-weight: bold; letter-spacing: 2px; color: #FFAA2B; margin-bottom: 6px; text-align: center; }
+  #rmHelpText { margin-bottom: 10px; }
   #fsBtn.hidden, #fsBtn2.hidden, #installBtn.hidden, #installNote.hidden, #padToast.hidden { display: none; }
   /* Controller: highlight the focused button */
   .pad-focus { outline: 2px solid #fff !important; outline-offset: 4px; box-shadow: 0 0 16px rgba(255,255,255,.55) !important; }
@@ -299,8 +311,24 @@
   <h1 id="overTitle">VICTORY</h1>
   <div id="finalScore">2 – 1</div>
   <div class="hint" id="overInfo"></div>
+  <div class="rm-status hidden" id="rmStatus" role="status"></div>
   <button class="btn go" id="againBtn">REMATCH</button>
+  <div class="small-row hidden" id="rmRow">
+    <button class="btn small" id="rmCancel">CANCEL REMATCH</button>
+    <button class="btn small" id="rmQuick">QUICK PLAY INSTEAD</button>
+  </div>
   <button class="btn" id="menuBtn">MENU</button>
+</div>
+
+<!-- Rematch accepted but the game hasn't started after 30 s: what's going on + choices -->
+<div id="rmHelp" class="hidden" role="dialog" aria-label="Rematch status">
+  <div class="rm-help-title">REMATCH IS TAKING A WHILE</div>
+  <div id="rmHelpText"></div>
+  <div class="small-row">
+    <button class="btn small" id="rmWait">KEEP WAITING</button>
+    <button class="btn small" id="rmHelpQuick">QUICK PLAY</button>
+    <button class="btn small" id="rmHelpMenu">MENU</button>
+  </div>
 </div>
 
 <!-- ================= NETWORK TEST ================= -->
@@ -336,7 +364,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20261002-172202';
+const BUILD = '20261002-224234';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1026,6 +1054,8 @@ class NetAdapter {
 
   /** Turn one rival presence object into game events. Input is untrusted: shape-check everything. */
   _ingest(peerId, s) {
+    // Rival is on the result screen ("on: 0" heartbeat, maybe with a rematch request): still here, not leaving.
+    if (s && typeof s === 'object' && s.v === 1 && !s.on && !s.bye) { this.emit('idle', { id: peerId, rm: +s.rm ? 1 : 0 }); return false; }
     if (!s || typeof s !== 'object' || s.v !== 1 || !s.on) { this.lastShots.delete(peerId); this.emit('leave', { id: peerId, bye: !!(s && s.bye) }); return false; }
     const m = {
       id: peerId, col: typeof s.col === 'string' && /^#[0-9a-f]{6}$/i.test(s.col) ? s.col : '#ffffff',
@@ -1459,6 +1489,7 @@ class TrysteroAdapter extends NetAdapter {
     this.lastShots.delete(id); this.emit('leave', { id, bye: true });
     if (this.closed) return;
     if (this.role === 'host') this._fresh();          // host: reopen a clean room, ready for the next player
+    else if (this.rejoin) { this.status = 'RECONNECTING…'; this._fresh(); }   // rematch in progress: find the host again
     else { this.status = 'HOST LEFT'; this.close(); } // joiner: done; Rematch will join from scratch
   }
   _rehost() {
@@ -1622,7 +1653,13 @@ class QuickMatchAdapter extends TrysteroAdapter {
   _lost() {
     const id = this.partner; this.partner = null;
     this.lastShots.delete(id); this.emit('leave', { id, bye: true });
-    if (!this.closed) this.close();
+    if (this.closed) return;
+    if (this.rejoin) {                                 // rematch in progress: both sides re-meet on the same code
+      this.status = 'RECONNECTING…';
+      this._fresh();
+      return;
+    }
+    this.close();
   }
   report() {
     if (this.searching) { const n = this.poolSize(); return `QUICK MATCH · ${n} PILOT${n === 1 ? '' : 'S'} SEARCHING` + (this.poolRestarts ? ` · REFRESHED ×${this.poolRestarts}` : ''); }
@@ -2084,6 +2121,7 @@ function bounceOff(o, a) {
 
 function wireNetHandlers(n) {
   n.on('state', m => {
+    if (state === 'over') { if (RM.mine && m.dr === 0) startRematch('rival-started'); return; }   // rival loaded the rematch first
     let r = remotes.get(m.id);
     if (!r) { r = new RemotePlayer(m.id, m.col); remotes.set(m.id, r); }
     r.goneAt = 0;                                     // heard from them: not gone
@@ -2103,6 +2141,7 @@ function wireNetHandlers(n) {
     else remotes.delete(m.id);
   });
   n.on('snapshot', applySnapshot);
+  n.on('idle', m => { if (state === 'over') rivalRematch(!!m.rm); });
   n.on('code', m => {                                 // code picked (taken code / quick match)
     if (n === bgNet) { adoptQuickMatch(); return; }   // found a pilot while fighting the bot
     roomCode = m.code; if (onlineRole !== 'random') showCode(m.code);
@@ -2190,6 +2229,8 @@ function buildPresence() {
 function showFinal() {
   state = 'over'; joy.active = false; fire.held = false;
   if (mode === 'online') leaveTimer = 90;            // keep broadcasting briefly so the rival sees the result
+  RM.mine = false; RM.theirs = false; RM.expired = false; RM.at = 0; RM.cancelled = false;
+  rematchWait = null; if (net) net.rejoin = false;
   const title = document.getElementById('overTitle'), big = document.getElementById('finalScore'), info = document.getElementById('overInfo');
   const oppName = mode === 'bot' ? 'THE BOT' : 'YOUR RIVAL';
   closeMenu(true);
@@ -2355,12 +2396,13 @@ function update() {
     netAcc += CFG.TICK_MS;
     if (netAcc >= 1000 / CFG.NET_SEND_HZ) { netAcc = 0; net.publish(buildPresence()); }
     if (leaveTimer > 0 && --leaveTimer === 0 && !net.keepAlive) net.close();
+    if (rematchWait) rematchTick();
   } else if (mode === 'online' && state === 'over' && net.keepAlive && !net.closed) {
     // On the result screen: a light "still here, not playing" beat keeps the direct link warm for a rematch.
     // After a minute with no rematch, close it so the next game starts from a clean connection.
     netAcc += CFG.TICK_MS;
-    if (netAcc >= 1000) { netAcc = 0; net.publish({ v: 1, on: 0 }); }
-    if (++overTicks > 60 * 60) net.close();
+    if (netAcc >= 500) { netAcc = 0; net.publish({ v: 1, on: 0, rm: RM.mine ? 1 : 0 }); }
+    if (++overTicks > (RM.mine || RM.theirs ? 90 : 60) * 60) { net.close(); RM.expired = true; }
   }
 
   // ---- Rocks (guests glide mirrored rocks toward the host's positions) ----
@@ -2513,6 +2555,15 @@ function drawBanners() {
   if (match.ph === 'wait') {
     const cy = H * 0.17;
     const joining = net.role === 'join';
+    if (rematchWait) {
+      const secs = Math.floor((performance.now() - rematchWait.at) / 1000);
+      const stage = /RECONNECT/.test(net.status || '') || !(net.linked && net.linked()) ? 'RECONNECTING TO YOUR RIVAL…'
+        : secs >= 15 ? 'RIVAL ACCEPTED · CHECKING THE CONNECTION…' : 'WAITING FOR YOUR RIVAL TO LOAD IN…';
+      glowText('REMATCH', W / 2, cy, '#ffffff', 22, 'center');
+      glowText(`${stage} ${secs}s`, W / 2, cy + 30, ship.color, 12, 'center');
+      glowText('Warm up: nothing counts yet', W / 2, cy + 54, '#8b80c4', 11, 'center', 0);
+      return;
+    }
     if (net.searching) {
       const secs = Math.floor((performance.now() - (net.startedAt || performance.now())) / 1000);
       glowText('FINDING AN OPPONENT', W / 2, cy, '#ffffff', 22, 'center');
@@ -3081,9 +3132,120 @@ Ads.init();
 
 document.getElementById('againBtn').addEventListener('click', () => {
   Sound.unlock(); Sound.play('click');
+  if (mode === 'online' && rematchLive()) { requestRematch(); return; }       // ask the rival; start when both agree
   const go = () => { overEl.classList.add('hidden'); startGame(); };
   if (mode === 'online' || bgNet) go(); else Ads.between('rematch', go);   // online rivals are waiting: no ad here
 });
+
+/* ---------------------------------------------------------------------
+   REMATCH HANDSHAKE (online). Tapping REMATCH asks the rival; the new game
+   only starts when BOTH have asked. The request rides on the result-screen
+   heartbeat ({on:0, rm:1}) twice a second, so it survives a dropped message.
+   Once both agree: at 15 s without the rival loading in we check the link and
+   reconnect if it's down; at 30 s we explain what's happening and offer
+   KEEP WAITING / QUICK PLAY / MENU.
+   --------------------------------------------------------------------- */
+const RM = { mine: false, theirs: false, at: 0, expired: false, cancelled: false };
+let rematchWait = null;            // { at, checked, helpAt } while a mutually-accepted rematch is connecting
+const rmStatus = document.getElementById('rmStatus'), rmRow = document.getElementById('rmRow');
+const rematchLive = () => !!(net && net.keepAlive && !net.closed && net.linked && net.linked());
+function requestRematch() {
+  if (RM.mine) return;
+  RM.mine = true; RM.at = performance.now(); RM.cancelled = false;
+  net.publish({ v: 1, on: 0, rm: 1 }); netAcc = 0;
+  track('rematch', { step: RM.theirs ? 'accepted' : 'requested' });
+  if (RM.theirs) startRematch('both');
+}
+function rivalRematch(wants) {
+  if (wants && !RM.theirs) { RM.theirs = true; RM.cancelled = false; if (!RM.mine) Sound.play('go'); }
+  else if (!wants && RM.theirs) { RM.theirs = false; RM.cancelled = true; }
+  if (RM.mine && RM.theirs) startRematch('both');
+}
+function startRematch(why) {
+  if (state !== 'over') return;
+  // tell the rival once more, then load in (they start the moment they see it)
+  net.publish({ v: 1, on: 0, rm: 1 });
+  net.rejoin = true;
+  rematchWait = { at: performance.now(), checked: false, helpAt: performance.now() + 30000 };
+  overEl.classList.add('hidden'); rmRow.classList.add('hidden');
+  startGame();
+}
+/** While a rematch both players accepted is connecting (game shows the warm-up field). */
+function rematchTick() {
+  if (state !== 'play' || match.ph !== 'wait') {
+    if (rematchWait) track('rematch', { step: 'started', secs: Math.round((performance.now() - rematchWait.at) / 1000) });
+    rematchWait = null; net.rejoin = false; document.getElementById('rmHelp').classList.add('hidden'); return;
+  }
+  const t = performance.now() - rematchWait.at;
+  if (t > 15000 && !rematchWait.checked) {
+    rematchWait.checked = true;
+    const quiet = performance.now() - (net.lastHeard || 0);
+    if (!net.linked() || quiet > 4000) { if (net.partner) net._lost(); else if (net._fresh) net._fresh(); }   // link looks dead: re-meet on the same code
+  }
+  if (performance.now() >= rematchWait.helpAt) showRematchHelp();
+}
+function rematchDiag() {
+  const linked = net.linked && net.linked(), quiet = Math.round((performance.now() - (net.lastHeard || 0)) / 1000);
+  const relay = net.diag && net.diag.relay, attempt = net.joinAttempt || 1, reconnecting = /RECONNECT/.test(net.status || '');
+  let verdict;
+  if (linked && quiet <= 3) verdict = '✅ Still connected to your rival — the rematch is processing. Their game is probably still loading (slow phone or a menu open).';
+  else if (reconnecting || !linked) verdict = `🔄 The connection dropped and the game is reconnecting you (attempt ${attempt}${relay ? ', via backup relay' : ''}). This can take up to a minute on strict Wi-Fi.`;
+  else verdict = `⚠️ No word from your rival for ${quiet}s — the rematch has probably failed (they may have closed the game or lost signal).`;
+  return `${verdict}<br><span style="opacity:.7">Link: ${linked ? 'up' : 'down'} · last heard ${quiet}s ago · ${relay ? 'relay' : 'direct'} · attempt ${attempt}</span>`;
+}
+function showRematchHelp() {
+  const box = document.getElementById('rmHelp');
+  document.getElementById('rmHelpText').innerHTML = rematchDiag();
+  if (box.classList.contains('hidden')) { box.classList.remove('hidden'); track('rematch', { step: 'slow', linked: net.linked() ? 1 : 0 }); }
+}
+document.getElementById('rmWait').addEventListener('click', () => {
+  Sound.play('click'); document.getElementById('rmHelp').classList.add('hidden');
+  if (rematchWait) rematchWait.helpAt = performance.now() + 30000;
+});
+function leaveForQuickPlay() {
+  try { if (net) { net.keepAlive = false; net.close(); } } catch (_) {}
+  rematchWait = null; RM.mine = false;
+  document.getElementById('rmHelp').classList.add('hidden'); overEl.classList.add('hidden'); rmRow.classList.add('hidden');
+  closeMenu(true);
+  quickPlay();
+}
+document.getElementById('rmHelpQuick').addEventListener('click', () => { track('rematch', { step: 'gave_up_quickplay' }); leaveForQuickPlay(); });
+document.getElementById('rmHelpMenu').addEventListener('click', () => { Sound.play('click'); track('rematch', { step: 'gave_up_menu' }); document.getElementById('rmHelp').classList.add('hidden'); backToMenu(); });
+document.getElementById('rmQuick').addEventListener('click', () => { track('rematch', { step: 'quickplay_instead' }); leaveForQuickPlay(); });
+document.getElementById('rmCancel').addEventListener('click', () => {
+  Sound.play('click'); RM.mine = false; net.publish({ v: 1, on: 0, rm: 0 }); track('rematch', { step: 'cancelled' });
+});
+/** Keep the result screen's rematch button + message in sync (called every frame). */
+function syncRematchUI() {
+  const again = document.getElementById('againBtn');
+  if (state !== 'over' || mode !== 'online') {
+    rmStatus.classList.add('hidden'); rmRow.classList.add('hidden'); again.classList.remove('pulse', 'waiting');
+    if (state === 'over' && again.textContent !== 'REMATCH') again.textContent = 'REMATCH';
+    return;
+  }
+  const live = rematchLive();
+  let msg = '', cls = '';
+  if (!live) {
+    msg = RM.expired && RM.mine ? 'No reply from your rival, so the rematch was closed. Try QUICK PLAY for a new opponent.'
+        : 'Your rival has left. Tap below to find a new match.';
+    cls = 'bad';
+    again.textContent = net.fromRandom ? 'QUICK PLAY' : 'PLAY AGAIN';
+  } else if (RM.mine && !RM.theirs) {
+    const secs = Math.floor((performance.now() - RM.at) / 1000);
+    msg = `Rematch requested — waiting for your rival to accept… ${secs}s`;
+    if (secs >= 15) msg += '<br><span style="opacity:.75">Still connected; they haven\'t tapped REMATCH yet.</span>';
+    again.textContent = 'WAITING FOR RIVAL…';
+  } else if (RM.theirs && !RM.mine) {
+    msg = '🔁 YOUR RIVAL WANTS A REMATCH!'; cls = 'ask'; again.textContent = 'ACCEPT REMATCH';
+  } else {
+    msg = RM.cancelled ? 'Your rival cancelled their rematch request.' : '';
+    again.textContent = 'REMATCH';
+  }
+  rmStatus.innerHTML = msg; rmStatus.className = 'rm-status' + (cls ? ' ' + cls : '') + (msg ? '' : ' hidden');
+  again.classList.toggle('pulse', live && RM.theirs && !RM.mine);
+  again.classList.toggle('waiting', live && RM.mine && !RM.theirs);
+  rmRow.classList.toggle('hidden', !(live && RM.mine && !RM.theirs));
+}
 function backToMenu() {
   if (state === 'play' && mode === 'online' && net.linked && !net.linked()) track('connect_abandon', {
     mode: modeLabel(), secs: Math.round((performance.now() - (net.startedAt || performance.now())) / 1000),
@@ -3374,6 +3536,7 @@ function padNeighbor(from, list, dir) {
 
 /** HUD buttons live in the page, not the canvas: show them only when they apply. */
 function syncHudButtons() {
+  syncRematchUI();
   pauseBtn.classList.toggle('hidden', state !== 'play' || menuOpen);
   const waiting = state === 'play' && !menuOpen && mode === 'online' && net.searching && match.ph === 'wait';
   const showBot = waiting && performance.now() - (net.startedAt || performance.now()) > BOT_OFFER_MS;
