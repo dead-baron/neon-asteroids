@@ -364,7 +364,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20261002-224234';
+const BUILD = '20261002-224602';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -1677,7 +1677,10 @@ function webAdapter() {
 }
 
 /** Direct links when on the open web; Claude's live channel inside Claude. */
-const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
+// Only Claude's artifact viewer counts — never the game's own website, even if a Claude
+// browser extension or Claude's built-in browser adds a window.claude object to every page.
+const OWN_HOST = /(^|\.)deadbaron\.com$|\.github\.io$|^localhost$|^127\./.test(location.hostname);
+const inClaude = () => !OWN_HOST && !!(window.claude && typeof window.claude.use === 'function');
 
 /* ---------------------------------------------------------------------
    ICE servers (how two phones find a path to each other).
