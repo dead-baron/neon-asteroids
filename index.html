@@ -56,6 +56,8 @@
   }
   canvas#game { position: fixed; inset: 0; width: 100vw; height: 100dvh; display: block; image-rendering: pixelated; }
   canvas#game.desk { cursor: crosshair; }
+  /* Desktop: a phone-shaped play area centered in the window, framed like an arcade screen */
+  canvas#game.cabinet { box-shadow: 0 0 0 1px #5a4aa8, 0 0 40px rgba(110,60,255,.35), 0 0 120px rgba(225,0,255,.12); }
 
   .overlay {
     position: fixed; inset: 0;
@@ -319,7 +321,7 @@
 'use strict';
 
 /** Build id. The site build stamps a timestamp here; phones compare it to spot a stale copy. */
-const BUILD = '20260929-175224';
+const BUILD = '20261002-155127';
 
 /* =====================================================================
    1. CONFIG, TIERS & PALETTE  (physics values are per 60 Hz tick)
@@ -420,10 +422,18 @@ const fieldAngleTo = (dx, dy) => Math.atan2(dy / SY, dx / SX);
 
 function resize() {
   // Crisp but affordable: cap the canvas at ~3.5 million pixels so full-screen desktops keep 60 fps
-  DPR = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(3.5e6 / Math.max(1, window.innerWidth * window.innerHeight)));
-  // Full window on every device. Online positions travel as fractions of the screen,
-  // so a phone and a wide monitor still share one playfield.
-  W = window.innerWidth; H = window.innerHeight;
+  DPR = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(3.5e6 / Math.max(1, window.innerHeight * Math.min(window.innerWidth, window.innerHeight * 0.5))));
+  if (DESKTOP) {
+    // Desktop: the same portrait shape as a phone (about 1:2), centered, so ships and rocks
+    // look as big as they do on a phone instead of tiny in a wide full-window field.
+    H = window.innerHeight; W = Math.min(window.innerWidth, Math.round(H * 0.5));
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    canvas.style.left = Math.round((window.innerWidth - W) / 2) + 'px';
+  } else {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.style.width = canvas.style.height = canvas.style.left = '';
+  }
+  canvas.classList.toggle('cabinet', DESKTOP && window.innerWidth > W + 8);
   SX = W / REF_W; SY = H / REF_H;
   canvas.classList.toggle('desk', DESKTOP);
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
